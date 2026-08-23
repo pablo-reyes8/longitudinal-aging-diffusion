@@ -7,15 +7,17 @@ import re
 from typing import Iterable, Sequence
 
 import pandas as pd
+from PIL import Image, ImageDraw
 
 from .checkpoint_loading import load_face_aging_adapter_for_inference
-from .comparison_helpers import generate_age_sweep
-from .infer_face_aging import save_inference_image
+from .infer_face_aging import infer_face_aging, save_inference_image
+from .inference_utils import prepare_inference_image, tensor_to_pil
 
 
 DIAGNOSTIC_COLUMNS = [
-    "checkpoint", "source_age", "target_age", "predicted_generated_age",
-    "age_error", "identity_cosine", "mode", "strength",
+    "checkpoint", "source_age", "target_age", "target_delta_age",
+    "predicted_source_age", "predicted_generated_age", "predicted_delta_age",
+    "age_error", "delta_age_error", "identity_cosine", "mode", "strength",
     "num_inference_steps", "text_guidance_scale", "image_guidance_scale", "seed",
 ]
 
@@ -36,6 +38,37 @@ def _checkpoint_label(path: Path) -> str:
     return str(path)
 
 
+def _save_annotated_grid(
+    *, source_image, source_age: int | None, results: list[dict],
+    image_size: int, output_path: Path,
+) -> Path:
+    source = tensor_to_pil(
+        prepare_inference_image(source_image, image_size=image_size).div(2).add(0.5)
+    )
+    images = [source, *[result["image"] for result in results]]
+    labels = ["Original" + (f"\nAge: {source_age}" if source_age is not None else "")]
+    for result in results:
+        diagnostics = result["diagnostics"]
+        predicted_delta = diagnostics["predicted_delta_age"]
+        delta_label = "n/a" if predicted_delta is None else f"{predicted_delta:.1f}"
+        labels.append(
+            f"Target: {diagnostics['target_age']:.0f}\n"
+            f"Pred: {diagnostics['predicted_generated_age']:.1f}\n"
+            f"Delta: {delta_label}\n"
+            f"ID: {diagnostics['identity_cosine_source_generated']:.2f}"
+        )
+    width, height = images[0].size
+    footer_height = 64
+    grid = Image.new("RGB", (width * len(images), height + footer_height), "white")
+    draw = ImageDraw.Draw(grid)
+    for index, (image, label) in enumerate(zip(images, labels)):
+        grid.paste(image, (index * width, 0))
+        draw.multiline_text((index * width + 5, height + 4), label, fill="black", spacing=1)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    grid.save(output_path)
+    return output_path
+
+
 def diagnose_checkpoint_age_sweep(
     checkpoint_path: str | Path,
     bundle,
@@ -47,7 +80,7 @@ def diagnose_checkpoint_age_sweep(
     mode: str = "direct",
     use_inverse_diffusion: bool | None = None,
     num_inference_steps: int = 50,
-    strength: float = 0.45,
+    strength: float = 0.35,
     inversion_strength: float = 1.0,
     text_guidance_scale: float = 7.0,
     image_guidance_scale: float = 1.5,
@@ -69,31 +102,39 @@ def diagnose_checkpoint_age_sweep(
     destination = Path(output_dir).expanduser() if output_dir is not None else None
     if destination is not None:
         destination.mkdir(parents=True, exist_ok=True)
-    sweep = generate_age_sweep(
-        bundle=bundle,
-        image=source_image,
-        ages=ages,
-        output_path=destination / "age_sweep.png" if destination is not None else None,
-        annotate_diagnostics=True,
-        include_source=True,
-        source_age=source_age,
-        mode=mode,
-        use_inverse_diffusion=use_inverse_diffusion,
-        num_inference_steps=num_inference_steps,
-        strength=strength,
-        inversion_strength=inversion_strength,
-        text_guidance_scale=text_guidance_scale,
-        image_guidance_scale=image_guidance_scale,
-        negative_prompt=negative_prompt,
-        prompt_style=prompt_style,
-        use_cfg=use_cfg,
-        seed=seed,
-        image_size=image_size,
-        compute_diagnostics=True,
-    )
+    results = [
+        infer_face_aging(
+            bundle=bundle,
+            image=source_image,
+            target_age=age,
+            source_age=source_age,
+            mode=mode,
+            use_inverse_diffusion=use_inverse_diffusion,
+            num_inference_steps=num_inference_steps,
+            strength=strength,
+            inversion_strength=inversion_strength,
+            text_guidance_scale=text_guidance_scale,
+            image_guidance_scale=image_guidance_scale,
+            negative_prompt=negative_prompt,
+            prompt_style=prompt_style,
+            use_cfg=use_cfg,
+            seed=seed,
+            image_size=image_size,
+            compute_diagnostics=True,
+        )
+        for age in ages
+    ]
+    if destination is not None:
+        _save_annotated_grid(
+            source_image=source_image,
+            source_age=source_age,
+            results=results,
+            image_size=image_size,
+            output_path=destination / "age_sweep.png",
+        )
 
     rows = []
-    for age, result in zip(ages, sweep["results"]):
+    for age, result in zip(ages, results):
         diagnostics = result.get("diagnostics")
         if diagnostics is None:
             raise RuntimeError("Auxiliary diagnostics unexpectedly returned None")
@@ -104,8 +145,12 @@ def diagnose_checkpoint_age_sweep(
             "checkpoint": _checkpoint_label(checkpoint),
             "source_age": source_age,
             "target_age": float(age),
+            "target_delta_age": diagnostics["target_delta_age"],
+            "predicted_source_age": diagnostics["predicted_source_age"],
             "predicted_generated_age": predicted,
+            "predicted_delta_age": diagnostics["predicted_delta_age"],
             "age_error": predicted - float(age),
+            "delta_age_error": diagnostics["delta_age_error"],
             "identity_cosine": diagnostics["identity_cosine_source_generated"],
             "mode": result["mode"],
             "strength": float(strength),

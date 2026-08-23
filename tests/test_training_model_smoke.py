@@ -18,6 +18,8 @@ def test_train_agging_model_real_loader_mixed_precision_checkpoint_and_validatio
     )
     bundle = make_training_bundle(seed=990)
     loss_fn = make_training_loss(bundle)
+    loss_fn.use_relative_age_loss = True
+    loss_fn.relative_age_weight = 0.05
     frozen = {
         "vae": clone_module_parameters(bundle["vae"]),
         "text": clone_module_parameters(bundle["text_encoder"]),
@@ -25,6 +27,7 @@ def test_train_agging_model_real_loader_mixed_precision_checkpoint_and_validatio
         "age": clone_module_parameters(loss_fn.age_estimator),
     }
     trainable = clone_module_parameters(bundle["unet"])
+    conditioner_before = clone_module_parameters(bundle["age_delta_conditioner"])
     result = TRAIN_AGGING_MODEL(
         bundle=bundle, loss_fn=loss_fn,
         train_loader=loaders["train"], val_loader=loaders["val"],
@@ -41,10 +44,19 @@ def test_train_agging_model_real_loader_mixed_precision_checkpoint_and_validatio
     assert result["precision"]["amp_dtype_name"] == "bf16" and result["scaler"] is None
     assert len(result["history"]["train"]) == len(result["history"]["val"]) == 1
     assert torch.isfinite(torch.tensor(result["history"]["val"][0]["val/loss_total"]))
+    for split, prefix in (("train", "train"), ("val", "val")):
+        metrics = result["history"][split][0]
+        assert f"{prefix}/loss_relative_age" in metrics
+        assert f"{prefix}/weighted_relative_age" in metrics
+        assert torch.isfinite(torch.tensor(metrics[f"{prefix}/loss_relative_age"]))
     assert result["memory_features"] == {"gradient_checkpointing": "unavailable", "xformers": "unavailable"}
     changed = {name for name, p in bundle["unet"].named_parameters() if p.requires_grad and not torch.equal(p, trainable[name])}
     assert any(name.startswith("conv_in") for name in changed)
     assert any("lora_" in name for name in changed)
+    assert any(
+        not torch.equal(parameter, conditioner_before[name])
+        for name, parameter in bundle["age_delta_conditioner"].named_parameters()
+    )
     for key, module in (("vae", bundle["vae"]), ("text", bundle["text_encoder"]), ("identity", loss_fn.identity_encoder), ("age", loss_fn.age_estimator)):
         assert all(torch.equal(parameter, frozen[key][name]) for name, parameter in module.named_parameters())
     root = tmp_path / "checkpoints"
@@ -121,4 +133,9 @@ def test_interrupted_resume_matches_uninterrupted_trajectory(tiny_root, tmp_path
     ):
         assert name_a == name_b
         assert torch.equal(parameter_a, parameter_b), name_a
+    for parameter_a, parameter_b in zip(
+        uninterrupted_bundle["age_delta_conditioner"].parameters(),
+        resumed_bundle["age_delta_conditioner"].parameters(),
+    ):
+        assert torch.equal(parameter_a, parameter_b)
     assert uninterrupted["lr_scheduler"].get_last_lr() == resumed["lr_scheduler"].get_last_lr()

@@ -32,6 +32,8 @@ def test_all_default_yaml_configs_are_mappings_and_model_dtype_is_resolved():
     model = model_builder_kwargs(load_yaml("config/models/sd15_lora.yaml"))
     assert model["dtype"] is None and model["device"] is None
     assert model["auxiliary_dtype"] is None
+    assert model["use_age_delta_conditioning"] is True
+    assert model["age_delta_scale"] == 80.0
     assert resolve_dtype("bf16") is torch.bfloat16
     assert resolve_dtype("fp16") is torch.float16
 
@@ -39,8 +41,10 @@ def test_all_default_yaml_configs_are_mappings_and_model_dtype_is_resolved():
 def test_cli_parsers_accept_minimal_documented_invocations():
     data_args = build_data_parser().parse_args(["--dataset-root", "/data"])
     assert data_args.dataset_root == "/data"
-    train_args = build_train_parser().parse_args(["--dataset-root", "/data"])
-    assert train_args.dataset_root == "/data"
+    train_args = build_train_parser().parse_args([
+        "--dataset-root", "/data", "--monitoring-source-age", "26",
+    ])
+    assert train_args.dataset_root == "/data" and train_args.monitoring_source_age == 26
     infer_args = build_infer_parser().parse_args([
         "--checkpoint", "model.pt", "--image", "face.jpg",
         "--target-age", "65", "--output", "aged.png",

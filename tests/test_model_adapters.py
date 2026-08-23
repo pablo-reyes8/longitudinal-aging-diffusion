@@ -91,13 +91,17 @@ def test_bundle_trainable_policy_and_optimizer_groups(adapter_type):
     )
     names = bundle["trainable_param_names"]
     assert any(name.startswith("conv_in.") for name in names)
-    assert all(name.startswith("conv_in.") or ".lora_" in name or name.endswith(".magnitude") for name in names)
+    assert all(
+        name.startswith("conv_in.") or ".lora_" in name or name.endswith(".magnitude")
+        or name.startswith("age_delta_conditioner.")
+        for name in names
+    )
     assert all(p.dtype == torch.float32 for p in bundle["trainable_params"])
     assert not any(p.requires_grad for p in bundle["vae"].parameters())
     assert not any(p.requires_grad for p in bundle["text_encoder"].parameters())
     optimizer = build_face_aging_optimizer(bundle, lr_lora=1e-4, lr_conv_in=2e-5)
-    assert [group["group_name"] for group in optimizer.param_groups] == ["adapter", "conv_in"]
-    assert [group["lr"] for group in optimizer.param_groups] == [1e-4, 2e-5]
+    assert [group["group_name"] for group in optimizer.param_groups] == ["adapter", "conv_in", "age_conditioner"]
+    assert [group["lr"] for group in optimizer.param_groups] == [1e-4, 2e-5, 1e-4]
 
 
 def test_adapter_target_failure_is_loud():

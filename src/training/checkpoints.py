@@ -10,6 +10,8 @@ from typing import Any, Callable, Mapping
 
 import torch
 
+from src.model import get_bundle_trainable_named_parameters
+
 from .seed import capture_rng_state, restore_rng_state
 
 
@@ -17,6 +19,8 @@ PROTECTED_BUNDLE_KEYS = (
     "model_id", "adapter_type", "rank", "target_modules",
     "source_conditioning", "unet_in_channels", "unet_cross_attention_dim",
     "identity_model_id", "age_model_id",
+    "use_age_delta_conditioning", "age_conditioning_mode", "age_delta_scale",
+    "age_condition_hidden_dim", "age_condition_output_dim",
 )
 PROTECTED_TRAINING_KEYS = (
     "max_train_steps", "total_planned_optimizer_steps", "grad_accum_steps",
@@ -24,19 +28,20 @@ PROTECTED_TRAINING_KEYS = (
     "conditioning_dropout_prob", "sample_source_posterior",
     "sample_target_posterior", "noise_offset", "min_snr_gamma",
     "auxiliary_max_timestep", "image_size",
+    "use_age_delta_conditioning", "age_conditioning_mode", "age_delta_scale",
+    "use_relative_age_loss", "relative_age_weight", "relative_age_loss_type",
 )
 
 
 def get_trainable_state_dict(bundle: Mapping[str, Any]) -> dict[str, torch.Tensor]:
     return {
         name: parameter.detach().cpu().clone()
-        for name, parameter in bundle["unet"].named_parameters()
-        if parameter.requires_grad
+        for name, parameter in get_bundle_trainable_named_parameters(bundle)
     }
 
 
 def load_trainable_state_dict(bundle: Mapping[str, Any], state: Mapping[str, torch.Tensor]) -> None:
-    parameters = {name: parameter for name, parameter in bundle["unet"].named_parameters() if parameter.requires_grad}
+    parameters = dict(get_bundle_trainable_named_parameters(bundle))
     if set(parameters) != set(state):
         raise ValueError(f"Trainable checkpoint keys mismatch: missing={sorted(set(parameters)-set(state))}, unexpected={sorted(set(state)-set(parameters))}")
     with torch.no_grad():

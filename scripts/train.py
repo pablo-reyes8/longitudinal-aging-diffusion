@@ -27,6 +27,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint-dir", help="Override checkpoint_dir from YAML")
     parser.add_argument("--resume-from", help="Override resume_from from YAML")
     parser.add_argument("--monitoring-image", help="Fixed image rendered at each sampling epoch")
+    parser.add_argument(
+        "--monitoring-source-age",
+        type=int,
+        help="Real age in --monitoring-image; required by relative-age conditioning",
+    )
     parser.add_argument("--local-files-only", action="store_true", help="Never access Hugging Face over network")
     return parser
 
@@ -43,6 +48,8 @@ def run(args: argparse.Namespace):
         training_config["resume_from"] = args.resume_from
     if args.monitoring_image:
         training_config["monitoring_image"] = args.monitoring_image
+    if args.monitoring_source_age is not None:
+        training_config["monitoring_source_age"] = args.monitoring_source_age
 
     loaders, metadata = build_face_aging_dataloaders(args.dataset_root, **data_config)
     bundle = build_face_aging_diffusion_bundle(**model_builder_kwargs(model_config))
@@ -53,6 +60,12 @@ def run(args: argparse.Namespace):
         raise ValueError("identity_weight > 0 requires load_auxiliary_models=true in the model YAML")
     if loss_config.get("age_weight", 0) and age_estimator is None:
         raise ValueError("age_weight > 0 requires load_auxiliary_models=true in the model YAML")
+    if (
+        loss_config.get("use_relative_age_loss", False)
+        and loss_config.get("relative_age_weight", 0) > 0
+        and age_estimator is None
+    ):
+        raise ValueError("relative age loss requires load_auxiliary_models=true in the model YAML")
     loss_fn = FaceAgingDiffusionLoss(
         scheduler=bundle["scheduler_train"],
         vae=bundle["vae"],

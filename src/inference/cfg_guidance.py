@@ -37,6 +37,7 @@ def predict_three_way_cfg(
     text_guidance_scale: float = 7.0,
     image_guidance_scale: float = 1.5,
     use_cfg: bool = True,
+    age_conditioning: torch.Tensor | None = None,
     return_branches: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
     batch = target_latents.shape[0]
@@ -51,9 +52,10 @@ def predict_three_way_cfg(
     if not use_cfg:
         model_input = build_conditioned_unet_input(target_latents, source_latents)
         with inference_autocast(bundle, target_latents.device):
-            prediction = bundle["unet"](
-                model_input, timestep, encoder_hidden_states=full_text_embeddings, return_dict=True
-            ).sample
+            kwargs = {"encoder_hidden_states": full_text_embeddings, "return_dict": True}
+            if age_conditioning is not None:
+                kwargs["timestep_cond"] = age_conditioning
+            prediction = bundle["unet"](model_input, timestep, **kwargs).sample
         return (prediction, {"full": prediction}) if return_branches else prediction
     targets = torch.cat((target_latents, target_latents, target_latents), dim=0)
     sources = torch.cat((source_latents, source_latents, torch.zeros_like(source_latents)), dim=0)
@@ -68,10 +70,15 @@ def predict_three_way_cfg(
     else:
         expanded_timestep = timestep
     model_input = build_conditioned_unet_input(targets, sources)
+    unet_kwargs = {"encoder_hidden_states": embeddings, "return_dict": True}
+    if age_conditioning is not None:
+        if age_conditioning.shape[0] != batch:
+            raise ValueError("Age-conditioning batch mismatch")
+        unet_kwargs["timestep_cond"] = age_conditioning.repeat(3, 1)
     with inference_autocast(bundle, target_latents.device):
         prediction = bundle["unet"](
             model_input, expanded_timestep,
-            encoder_hidden_states=embeddings, return_dict=True,
+            **unet_kwargs,
         ).sample
     eps_full, eps_image, eps_uncond = prediction.chunk(3, dim=0)
     guided = combine_three_way_cfg(

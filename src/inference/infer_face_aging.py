@@ -8,7 +8,7 @@ from typing import Any
 from PIL import Image
 import torch
 
-from src.model import encode_prompts
+from src.model import compute_age_delta_embedding, encode_prompts
 
 from .cfg_guidance import predict_three_way_cfg
 from .ddim_inversion import (
@@ -50,6 +50,7 @@ def _direct_latent_edit(
     image_guidance_scale: float,
     use_cfg: bool,
     generator,
+    age_conditioning: torch.Tensor | None,
     return_intermediates: bool,
 ) -> dict[str, Any]:
     if not 0 < strength <= 1:
@@ -79,6 +80,7 @@ def _direct_latent_edit(
             text_guidance_scale=text_guidance_scale,
             image_guidance_scale=image_guidance_scale,
             use_cfg=use_cfg,
+            age_conditioning=age_conditioning,
         ).to(latents.dtype)
         guided_norms.append(float(prediction.float().norm()))
         latents = scheduler_reverse_step(scheduler, prediction, timestep, latents, generator)
@@ -120,7 +122,7 @@ def infer_face_aging(
     mode: str = "direct",
     use_inverse_diffusion: bool | None = None,
     num_inference_steps: int = 50,
-    strength: float = 0.45,
+    strength: float = 0.35,
     inversion_strength: float = 1.0,
     text_guidance_scale: float = 7.0,
     image_guidance_scale: float = 1.5,
@@ -135,6 +137,7 @@ def infer_face_aging(
     return_latents: bool = False,
     return_intermediates: bool = False,
     compute_diagnostics: bool = True,
+    use_age_delta_conditioning: bool | None = None,
     identity_encoder=None,
     age_estimator=None,
     device: str | torch.device | None = None,
@@ -155,15 +158,50 @@ def infer_face_aging(
         bundle["unet"].to(resolved_device)
         bundle["vae"].to(resolved_device)
         bundle["text_encoder"].to(resolved_device)
+        if bundle.get("age_delta_conditioner") is not None:
+            bundle["age_delta_conditioner"].to(resolved_device)
     vae_dtype = module_device_dtype(bundle["vae"])[1]
     source_images = prepare_inference_image(
         image, image_size=image_size, device=resolved_device, dtype=vae_dtype
     )
     source_latents = encode_image_to_latent(bundle, source_images, sample_posterior=False)
+    bundle_age_conditioning = bool(bundle.get("use_age_delta_conditioning", False))
+    resolved_age_conditioning = (
+        bundle_age_conditioning
+        if use_age_delta_conditioning is None
+        else bool(use_age_delta_conditioning)
+    )
+    if resolved_age_conditioning and not bundle_age_conditioning:
+        raise ValueError("The loaded bundle has no age-delta conditioner")
+    if resolved_age_conditioning:
+        if prompt_pack["source_age"] is None or prompt_pack["target_age"] is None:
+            raise ValueError(
+                "source_age and target_age are required when age-delta conditioning is enabled"
+            )
+        delta_value = float(prompt_pack["target_age"] - prompt_pack["source_age"])
+        edit_age_conditioning = compute_age_delta_embedding(
+            bundle,
+            torch.full((source_latents.shape[0],), delta_value, device=resolved_device),
+            batch_size=source_latents.shape[0],
+        )
+        source_age_conditioning = compute_age_delta_embedding(
+            bundle,
+            torch.zeros(source_latents.shape[0], device=resolved_device),
+            batch_size=source_latents.shape[0],
+        )
+    else:
+        delta_value = None
+        edit_age_conditioning = source_age_conditioning = None
     scheduler = create_inference_scheduler(bundle)
     actual_generator = make_generator(resolved_device, seed, generator)
     previous_mode = bundle["unet"].training
+    previous_age_mode = (
+        bundle["age_delta_conditioner"].training
+        if bundle.get("age_delta_conditioner") is not None else None
+    )
     bundle["unet"].eval(); bundle["vae"].eval(); bundle["text_encoder"].eval()
+    if bundle.get("age_delta_conditioner") is not None:
+        bundle["age_delta_conditioner"].eval()
     try:
         if mode == "direct":
             edit = _direct_latent_edit(
@@ -174,6 +212,7 @@ def infer_face_aging(
                 text_guidance_scale=text_guidance_scale,
                 image_guidance_scale=image_guidance_scale,
                 use_cfg=use_cfg, generator=actual_generator,
+                age_conditioning=edit_age_conditioning,
                 return_intermediates=return_intermediates,
             )
             inversion = None
@@ -186,6 +225,7 @@ def infer_face_aging(
                 # Unit scales reconstruct the full source condition during inversion.
                 text_guidance_scale=1.0, image_guidance_scale=1.0,
                 negative_prompt=negative_prompt, use_cfg=use_cfg,
+                age_conditioning=source_age_conditioning,
                 return_intermediates=return_intermediates,
             )
             edit = edit_from_inverted_latent(
@@ -196,12 +236,15 @@ def infer_face_aging(
                 text_guidance_scale=text_guidance_scale,
                 image_guidance_scale=image_guidance_scale,
                 negative_prompt=negative_prompt, use_cfg=use_cfg,
+                age_conditioning=edit_age_conditioning,
                 generator=actual_generator,
                 return_intermediates=return_intermediates,
             )
         image_tensor = decode_latents_to_tensor(bundle, edit["latents"])
     finally:
         bundle["unet"].train(previous_mode)
+        if bundle.get("age_delta_conditioner") is not None:
+            bundle["age_delta_conditioner"].train(previous_age_mode)
         bundle["vae"].eval(); bundle["text_encoder"].eval()
     formatted = _format_images(image_tensor, output_type)
     diagnostics = None
@@ -211,6 +254,7 @@ def infer_face_aging(
             source_image=source_images.float().div(2).add(0.5),
             generated_image=image_tensor,
             target_age=prompt_pack["target_age"],
+            source_age=prompt_pack["source_age"],
             image_size=image_size,
             identity_encoder=identity_encoder,
             age_estimator=age_estimator,
@@ -236,6 +280,8 @@ def infer_face_aging(
             "negative_prompt": negative_prompt,
             "prompt_style": prompt_style,
             "prompt_warnings": prompt_pack["warnings"],
+            "use_age_delta_conditioning": resolved_age_conditioning,
+            "delta_age": delta_value,
             "start_timestep": edit.get("start_timestep", inversion.get("start_timestep") if inversion else None),
         },
     }

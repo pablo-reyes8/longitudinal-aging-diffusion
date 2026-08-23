@@ -9,6 +9,7 @@ from torch import nn
 import src.loss as loss_api
 import src.loss.pretrained_auxiliary as auxiliary_loading
 import src.model.load_diffusion_models as model_loading
+from src.model import get_bundle_trainable_named_parameters
 from model_fakes import make_fake_components
 from src.loss import (
     AGE_MODEL_ID,
@@ -195,7 +196,7 @@ def test_bundle_option_attaches_auxiliaries_without_making_them_trainable(monkey
     assert observed["device"] == torch.device("cpu")
     assert observed["trust_remote_code"] is True
     assert set(bundle["trainable_param_names"]) == {
-        name for name, parameter in bundle["unet"].named_parameters() if parameter.requires_grad
+        name for name, _ in get_bundle_trainable_named_parameters(bundle)
     }
     assert all(not parameter.requires_grad for parameter in identity.parameters())
     assert all(not parameter.requires_grad for parameter in age.parameters())

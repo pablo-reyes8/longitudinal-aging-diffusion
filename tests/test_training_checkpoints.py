@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from src.model import build_face_aging_optimizer
+from src.model import build_face_aging_optimizer, get_bundle_trainable_named_parameters
 from src.training import (
     TrainingCheckpointManager,
     WarmupCosineLR,
@@ -19,7 +19,7 @@ from training_fakes import make_training_bundle, make_training_loss
 
 def deterministic_optimizer_step(bundle, optimizer, scheduler):
     optimizer.zero_grad(set_to_none=True)
-    objective = sum(parameter.square().sum() for parameter in bundle["unet"].parameters() if parameter.requires_grad)
+    objective = sum(parameter.square().sum() for _, parameter in get_bundle_trainable_named_parameters(bundle))
     objective.backward(); optimizer.step(); scheduler.step()
 
 
@@ -53,9 +53,17 @@ def test_checkpoint_roundtrip_and_next_update_exactness(tmp_path):
         ((n, p) for n, p in rebuilt["unet"].named_parameters() if p.requires_grad),
     ):
         assert name_a == name_b and torch.equal(parameter_a, parameter_b)
+    for parameter_a, parameter_b in zip(
+        bundle["age_delta_conditioner"].parameters(), rebuilt["age_delta_conditioner"].parameters()
+    ):
+        assert torch.equal(parameter_a, parameter_b)
     deterministic_optimizer_step(bundle, optimizer, scheduler)
     deterministic_optimizer_step(rebuilt, rebuilt_optimizer, rebuilt_scheduler)
     for parameter_a, parameter_b in zip(bundle["unet"].parameters(), rebuilt["unet"].parameters()):
+        assert torch.equal(parameter_a, parameter_b)
+    for parameter_a, parameter_b in zip(
+        bundle["age_delta_conditioner"].parameters(), rebuilt["age_delta_conditioner"].parameters()
+    ):
         assert torch.equal(parameter_a, parameter_b)
     assert scheduler.get_last_lr() == rebuilt_scheduler.get_last_lr()
 

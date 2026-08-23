@@ -65,7 +65,9 @@ def test_inference_diagnostics_do_not_change_generated_output():
     assert torch.equal(plain["image_tensor"], diagnosed["image_tensor"])
     assert plain["diagnostics"] is None
     assert set(diagnosed["diagnostics"]) == {
-        "target_age", "predicted_generated_age", "identity_cosine_source_generated"
+        "target_age", "predicted_source_age", "predicted_generated_age",
+        "target_delta_age", "predicted_delta_age", "delta_age_error",
+        "identity_cosine_source_generated",
     }
 
 
@@ -111,8 +113,9 @@ def test_checkpoint_diagnostic_age_error_and_generation_match_normal_inference(t
         image_size=32,
     )
     assert frame.columns.tolist() == [
-        "checkpoint", "source_age", "target_age", "predicted_generated_age",
-        "age_error", "identity_cosine", "mode", "strength",
+        "checkpoint", "source_age", "target_age", "target_delta_age",
+        "predicted_source_age", "predicted_generated_age", "predicted_delta_age",
+        "age_error", "delta_age_error", "identity_cosine", "mode", "strength",
         "num_inference_steps", "text_guidance_scale", "image_guidance_scale", "seed",
     ]
     assert torch.equal(

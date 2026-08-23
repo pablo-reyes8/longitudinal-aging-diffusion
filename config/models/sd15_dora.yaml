@@ -7,6 +7,11 @@ alpha: 16.0
 dropout: 0.0
 target_modules: [to_q, to_k, to_v, to_out.0]
 source_conditioning: concat
+use_age_delta_conditioning: true
+age_conditioning_mode: delta_mlp
+age_delta_scale: 80.0
+age_condition_hidden_dim: 128
+age_condition_output_dim: null
 device: auto
 dtype: auto
 local_files_only: false

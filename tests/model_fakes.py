@@ -101,11 +101,23 @@ class FakeDownBlock(nn.Module):
         self.attentions = nn.ModuleList([FakeAttentionContainer()])
 
 
+class FakeTimeEmbedding(nn.Module):
+    def __init__(self, output_dim=8):
+        super().__init__()
+        self.linear_1 = nn.Linear(1, output_dim)
+        self.linear_2 = nn.Linear(output_dim, output_dim)
+
+    def forward(self, sample, condition=None):
+        embedding = self.linear_2(F.silu(self.linear_1(sample)))
+        return embedding if condition is None else embedding + condition
+
+
 class FakeUNet(nn.Module):
     def __init__(self):
         super().__init__()
         self.config = SimpleNamespace(in_channels=4, out_channels=4, cross_attention_dim=6, sample_size=4)
         self.conv_in = nn.Conv2d(4, 8, 3, padding=1)
+        self.time_embedding = FakeTimeEmbedding(8)
         self.context_proj = nn.Linear(6, 8)
         self.down_blocks = nn.ModuleList([FakeDownBlock()])
         self.conv_out = nn.Conv2d(8, 4, 3, padding=1)
@@ -114,9 +126,14 @@ class FakeUNet(nn.Module):
         for key, value in kwargs.items():
             setattr(self.config, key, value)
 
-    def forward(self, sample, timestep, encoder_hidden_states, return_dict=True):
+    def forward(self, sample, timestep, encoder_hidden_states, timestep_cond=None, return_dict=True):
         hidden = self.conv_in(sample)
         batch, channels, height, width = hidden.shape
+        timestep_values = torch.as_tensor(timestep, device=hidden.device, dtype=hidden.dtype)
+        if timestep_values.ndim == 0:
+            timestep_values = timestep_values.expand(batch)
+        time_embedding = self.time_embedding(timestep_values.reshape(batch, 1), timestep_cond)
+        hidden = hidden + time_embedding.to(hidden).view(batch, channels, 1, 1)
         tokens = hidden.permute(0, 2, 3, 1).reshape(batch, height * width, channels)
         context = self.context_proj(encoder_hidden_states.mean(dim=1)).unsqueeze(1)
         tokens = tokens + context

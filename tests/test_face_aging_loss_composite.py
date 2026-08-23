@@ -35,7 +35,10 @@ def make_loss(
     scheduler = NumericalScheduler(prediction_type, steps=100, dtype=dtype)
     vae = TinyVAE().to(dtype)
     identity = IdentityEncoderAdapter(TinyIdentityModel().to(dtype)) if identity_weight > 0 else None
-    age = AgeEstimatorAdapter(TinyAgeModel().to(dtype)) if age_weight > 0 else None
+    needs_age = age_weight > 0 or (
+        kwargs.get("use_relative_age_loss", False) and kwargs.get("relative_age_weight", 0) > 0
+    )
+    age = AgeEstimatorAdapter(TinyAgeModel().to(dtype)) if needs_age else None
     loss = FaceAgingDiffusionLoss(
         scheduler=scheduler,
         vae=vae,
@@ -66,7 +69,9 @@ def make_inputs(loss_fn, batch=4, dtype=torch.float64, requires_grad=True):
         "timesteps": timesteps,
         "source_images": torch.randn(batch, 1, 2, 2, dtype=dtype).clamp(-1, 1),
         "target_images": torch.randn(batch, 1, 2, 2, dtype=dtype).clamp(-1, 1),
+        "source_ages": torch.linspace(10, 30, batch),
         "target_ages": torch.linspace(20, 50, batch),
+        "delta_ages": torch.linspace(10, 20, batch),
         "global_step": 0,
     }
 
@@ -174,6 +179,58 @@ def test_target_age_python_list_matches_tensor():
     inputs["target_ages"] = torch.tensor([20, 30, 40])
     tensor_loss = loss_fn(**inputs)["loss_age"]
     assert torch.equal(list_loss, tensor_loss)
+
+
+@pytest.mark.parametrize("loss_type", ["l1", "mse"])
+def test_relative_age_loss_matches_analytical_reference_and_detaches_source(loss_type):
+    loss_fn = make_loss(
+        identity_weight=0,
+        age_weight=0,
+        use_relative_age_loss=True,
+        relative_age_weight=0.05,
+        relative_age_loss_type=loss_type,
+    )
+    inputs = make_inputs(loss_fn, batch=3)
+    inputs["source_images"].requires_grad_(True)
+    output = loss_fn(**inputs, return_reconstructions=True, return_per_sample=True)
+    predicted_generated = loss_fn.age_estimator(output["pred_x0_images"])
+    with torch.no_grad():
+        predicted_source = loss_fn.age_estimator((inputs["source_images"] / 2 + 0.5).clamp(0, 1))
+    error = predicted_generated - predicted_source - inputs["delta_ages"].float()
+    expected = error.abs() if loss_type == "l1" else error.square()
+    assert torch.allclose(output["loss_relative_age_per_sample"], expected, atol=1e-12)
+    assert torch.equal(output["loss"], output["weighted_diff"] + output["weighted_relative_age"])
+    source_gradient = torch.autograd.grad(
+        output["loss_relative_age"], inputs["source_images"], allow_unused=True, retain_graph=True
+    )[0]
+    assert source_gradient is None
+    assert torch.autograd.grad(output["loss_relative_age"], inputs["model_pred"])[0].norm() > 0
+
+
+def test_exact_predicted_delta_has_zero_relative_loss_and_branch_can_be_disabled():
+    enabled = make_loss(
+        identity_weight=0, age_weight=0,
+        use_relative_age_loss=True, relative_age_weight=0.05,
+    )
+    inputs = make_inputs(enabled, batch=3)
+    probe = enabled(**inputs, return_reconstructions=True)
+    with torch.no_grad():
+        pred_generated = enabled.age_estimator(probe["pred_x0_images"])
+        pred_source = enabled.age_estimator((inputs["source_images"] / 2 + 0.5).clamp(0, 1))
+    inputs["delta_ages"] = pred_generated.detach() - pred_source
+    exact = enabled(**inputs)
+    assert exact["loss_relative_age"].item() == pytest.approx(0.0, abs=1e-8)
+
+    disabled = copy.deepcopy(enabled)
+    disabled.use_relative_age_loss = False
+    disabled.relative_age_weight = 0.05
+    disabled_output = disabled(**inputs)
+    zero_weight = copy.deepcopy(enabled)
+    zero_weight.relative_age_weight = 0.0
+    zero_output = zero_weight(**inputs)
+    assert disabled_output["loss_relative_age"].item() == 0
+    assert disabled_output["weighted_relative_age"].item() == 0
+    assert torch.equal(disabled_output["loss"], zero_output["loss"])
 
 
 def test_per_sample_reduction_duplicate_and_batch_size_invariance():

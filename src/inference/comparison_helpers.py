@@ -30,9 +30,14 @@ def _age_diagnostic_label(result) -> str:
     diagnostics = result.get("diagnostics")
     if diagnostics is None:
         return f"Target: {result['target_age']}"
+    delta_label = (
+        f"Delta: {diagnostics['predicted_delta_age']:.1f}\n"
+        if diagnostics.get("predicted_delta_age") is not None else ""
+    )
     return (
         f"Target: {diagnostics['target_age']:.0f}\n"
         f"Pred: {diagnostics['predicted_generated_age']:.1f}\n"
+        f"{delta_label}"
         f"ID: {diagnostics['identity_cosine_source_generated']:.2f}"
     )
 

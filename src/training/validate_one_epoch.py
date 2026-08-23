@@ -32,6 +32,10 @@ def _stratified_metrics(tracker: MetricsTracker, batch, output: dict, loss_fn) -
         values = output["loss_age_per_sample"].detach().float()
         age[indices] = values if loss_fn.age_loss_type == "l1" else values.sqrt()
         total[indices] += loss_fn.age_weight * values
+    if output["loss_relative_age_per_sample"].numel():
+        indices = output["auxiliary_indices"]
+        values = output["loss_relative_age_per_sample"].detach().float()
+        total[indices] += loss_fn.relative_age_weight * values
     for index in range(batch_size):
         gap = bin_name(float(batch["delta_age"][index]), AGE_GAP_BINS)
         source_band = bin_name(float(batch["source_age"][index]), AGE_BANDS)
@@ -64,6 +68,8 @@ def validate_one_epoch(
 ) -> dict[str, Any]:
     previous_unet_mode = bundle["unet"].training
     bundle["unet"].eval()
+    if bundle.get("age_delta_conditioner") is not None:
+        bundle["age_delta_conditioner"].eval()
     bundle["vae"].eval()
     bundle["text_encoder"].eval()
     loss_fn.eval()
@@ -108,9 +114,11 @@ def validate_one_epoch(
                     "loss_diff": float(output["loss_diff"]),
                     "loss_id": float(output["loss_id"]),
                     "loss_age": float(output["loss_age"]),
+                    "loss_relative_age": float(output["loss_relative_age"]),
                     "weighted_diff": float(output["weighted_diff"]),
                     "weighted_id": float(output["weighted_id"]),
                     "weighted_age": float(output["weighted_age"]),
+                    "weighted_relative_age": float(output["weighted_relative_age"]),
                     "identity_cosine": output["metrics"]["identity_cosine_mean"],
                     "age_mae": float(output["loss_age"]) if loss_fn.age_loss_type == "l1" else float(output["loss_age"].sqrt()),
                     **result["diagnostics"],
@@ -123,6 +131,8 @@ def validate_one_epoch(
     finally:
         if previous_unet_mode:
             bundle["unet"].train()
+            if bundle.get("age_delta_conditioner") is not None:
+                bundle["age_delta_conditioner"].train()
         bundle["vae"].eval()
         bundle["text_encoder"].eval()
         loss_fn.train(previous_unet_mode)

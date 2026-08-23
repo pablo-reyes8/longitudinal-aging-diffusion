@@ -45,7 +45,7 @@ def test_inference_and_training_resume_checkpoints_load_without_optimizer_depend
     original, inference_path, training_path = make_saved_checkpoints(tmp_path)
     image = Image.new("RGB", (32, 32), (90, 60, 30))
     expected = infer_face_aging_direct(
-        bundle=original, image=image, target_age=60,
+        bundle=original, image=image, source_age=30, target_age=60,
         num_inference_steps=4, strength=0.5, image_size=32,
         seed=7, return_latents=True,
     )
@@ -55,7 +55,7 @@ def test_inference_and_training_resume_checkpoints_load_without_optimizer_depend
         rebuilt = make_training_bundle(seed=602)
         report = load_face_aging_adapter_for_inference(rebuilt, checkpoint)
         observed = infer_face_aging_direct(
-            bundle=rebuilt, image=image, target_age=60,
+            bundle=rebuilt, image=image, source_age=30, target_age=60,
             num_inference_steps=4, strength=0.5, image_size=32,
             seed=7, return_latents=True,
         )

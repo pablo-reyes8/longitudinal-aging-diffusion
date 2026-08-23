@@ -50,10 +50,11 @@ def compute_face_aging_diagnostics(
     generated_image: str | Path | Image.Image | torch.Tensor,
     target_age: int | float,
     *,
+    source_age: int | float | None = None,
     image_size: int = 256,
     identity_encoder=None,
     age_estimator=None,
-) -> dict[str, float] | None:
+) -> dict[str, float | None] | None:
     """Measure generated age and source/generated identity cosine.
 
     The already configured loss adapters are called directly, so ArcFace and
@@ -79,11 +80,28 @@ def compute_face_aging_diagnostics(
 
     age_device = _module_device(age_estimator)
     predicted_age = age_estimator(generated_01.to(age_device)).float()
+    predicted_source_age = age_estimator(source_01.to(age_device)).float()
     if predicted_age.numel() != generated_01.shape[0]:
         raise ValueError("Age estimator must produce one scalar per generated image")
 
-    return {
+    result = {
         "target_age": float(target_age),
         "predicted_generated_age": float(predicted_age.mean().cpu()),
+        "predicted_source_age": float(predicted_source_age.mean().cpu()),
         "identity_cosine_source_generated": float(cosine.mean().cpu()),
     }
+    if source_age is not None:
+        target_delta = float(target_age) - float(source_age)
+        predicted_delta = result["predicted_generated_age"] - result["predicted_source_age"]
+        result.update({
+            "target_delta_age": target_delta,
+            "predicted_delta_age": predicted_delta,
+            "delta_age_error": predicted_delta - target_delta,
+        })
+    else:
+        result.update({
+            "target_delta_age": None,
+            "predicted_delta_age": None,
+            "delta_age_error": None,
+        })
+    return result

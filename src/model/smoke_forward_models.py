@@ -12,9 +12,11 @@ from .load_diffusion_models import (
     build_conditioned_unet_input,
     build_face_aging_optimizer,
     encode_prompts,
+    get_bundle_trainable_named_parameters,
     prepare_source_target_latents,
     tokenizer_audit,
 )
+from .age_conditioning import compute_age_delta_embedding
 
 
 def _autocast_context(device: torch.device, dtype: torch.dtype):
@@ -32,6 +34,7 @@ def prepare_face_aging_forward(
     noise: torch.Tensor | None = None,
     timesteps: torch.Tensor | None = None,
     generator: torch.Generator | None = None,
+    delta_ages: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     """Prepare and execute one denoising prediction, without defining a loss."""
     latents = prepare_source_target_latents(bundle, source_images, target_images)
@@ -57,12 +60,17 @@ def prepare_face_aging_forward(
     conditioned_input = conditioned_input.to(unet_device)
     timesteps = timesteps.to(unet_device)
     hidden_states = hidden_states.to(unet_device)
+    age_conditioning = compute_age_delta_embedding(
+        bundle, delta_ages, batch_size=conditioned_input.shape[0]
+    ) if delta_ages is not None else None
+    unet_kwargs = {"encoder_hidden_states": hidden_states, "return_dict": True}
+    if age_conditioning is not None:
+        unet_kwargs["timestep_cond"] = age_conditioning
     with _autocast_context(unet_device, compute_dtype):
         noise_pred = bundle["unet"](
             conditioned_input,
             timesteps,
-            encoder_hidden_states=hidden_states,
-            return_dict=True,
+            **unet_kwargs,
         ).sample
     return {
         **latents,
@@ -71,6 +79,7 @@ def prepare_face_aging_forward(
         "noisy_target_latents": noisy_target,
         "conditioned_input": conditioned_input,
         "encoder_hidden_states": hidden_states,
+        "age_conditioning": age_conditioning,
         "noise_pred": noise_pred,
     }
 
@@ -139,8 +148,9 @@ def run_face_aging_model_validation(
     )
     if adapter_actual != adapter["expected_adapter_parameters"]:
         errors.append(f"Adapter parameter formula mismatch: expected={adapter['expected_adapter_parameters']}, actual={adapter_actual}")
-    trainable = [(name, parameter) for name, parameter in unet.named_parameters() if parameter.requires_grad]
-    invalid_trainable = [name for name, _ in trainable if not (name.startswith("conv_in.") or ".lora_" in name or name.endswith(".magnitude"))]
+    unet_trainable = [(name, parameter) for name, parameter in unet.named_parameters() if parameter.requires_grad]
+    trainable = get_bundle_trainable_named_parameters(bundle)
+    invalid_trainable = [name for name, _ in unet_trainable if not (name.startswith("conv_in.") or ".lora_" in name or name.endswith(".magnitude"))]
     if invalid_trainable:
         errors.append(f"Unexpected trainable U-Net parameters: {invalid_trainable}")
     non_fp32 = [name for name, parameter in trainable if parameter.dtype != torch.float32]
@@ -177,7 +187,8 @@ def run_face_aging_model_validation(
         if prompt_report["deterministic_max_error"] != 0 or not prompt_report["finite"]:
             errors.append("Frozen prompt encoder is non-deterministic or non-finite")
         prepared = prepare_face_aging_forward(
-            bundle, batch["source_image"], batch["target_image"], prompts
+            bundle, batch["source_image"], batch["target_image"], prompts,
+            delta_ages=batch.get("delta_age"),
         )
         source, target = prepared["source_latents"], prepared["target_latents"]
         latent_report = {
@@ -216,13 +227,17 @@ def run_face_aging_model_validation(
         if not scheduler_report["deterministic"] or not scheduler_report["finite"]:
             errors.append("Training scheduler is non-deterministic or non-finite for fixed inputs")
         unet.zero_grad(set_to_none=True)
+        if bundle.get("age_delta_conditioner") is not None:
+            bundle["age_delta_conditioner"].zero_grad(set_to_none=True)
         prepared["noise_pred"].float().square().mean().backward()
-        adapter_named = [(name, p) for name, p in trainable if not name.startswith("conv_in.")]
-        conv_named = [(name, p) for name, p in trainable if name.startswith("conv_in.")]
+        adapter_named = [(name, p) for name, p in unet_trainable if not name.startswith("conv_in.")]
+        conv_named = [(name, p) for name, p in unet_trainable if name.startswith("conv_in.")]
+        age_named = [(name, p) for name, p in trainable if name.startswith("age_delta_conditioner.")]
         frozen_named = [(name, p) for name, p in unet.named_parameters() if not p.requires_grad]
         gradient_report = {
             "adapter": _gradient_summary(adapter_named),
             "conv_in": _gradient_summary(conv_named),
+            "age_delta_conditioner": _gradient_summary(age_named),
             "frozen_unet": _gradient_summary(frozen_named),
             "vae": _gradient_summary(list(vae.named_parameters())),
             "text_encoder": _gradient_summary(list(text_encoder.named_parameters())),
@@ -231,9 +246,13 @@ def run_face_aging_model_validation(
             errors.append("At least one trainable adapter tensor has grad=None")
         if gradient_report["conv_in"]["with_grad"] != gradient_report["conv_in"]["parameters"]:
             errors.append("At least one trainable conv_in tensor has grad=None")
+        if age_named and gradient_report["age_delta_conditioner"]["with_grad"] != gradient_report["age_delta_conditioner"]["parameters"]:
+            errors.append("At least one age-delta conditioner tensor has grad=None")
         if any(gradient_report[group]["with_grad"] for group in ("frozen_unet", "vae", "text_encoder")):
             errors.append("A frozen parameter received a gradient")
         unet.zero_grad(set_to_none=True)
+        if bundle.get("age_delta_conditioner") is not None:
+            bundle["age_delta_conditioner"].zero_grad(set_to_none=True)
     else:
         warnings.append("No batch supplied; latent, prompt, forward, and gradient integration tests were not run")
 

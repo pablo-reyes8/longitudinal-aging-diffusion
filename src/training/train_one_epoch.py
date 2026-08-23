@@ -8,13 +8,15 @@ from typing import Any, Mapping
 
 import torch
 
+from src.model import get_bundle_trainable_named_parameters
+
 from .metrics import AGE_GAP_BINS, MetricsTracker, bin_name, optimizer_group_lrs
 from .mixed_precision import move_batch_to_device, safe_optimizer_step as perform_safe_optimizer_step
 from .training_step import run_training_step
 
 
 def _trainable_parameters(bundle: Mapping[str, Any]) -> list[torch.nn.Parameter]:
-    parameters = [parameter for parameter in bundle["unet"].parameters() if parameter.requires_grad]
+    parameters = [parameter for _, parameter in get_bundle_trainable_named_parameters(bundle)]
     if not parameters:
         raise RuntimeError("The U-Net has no trainable parameters")
     return parameters
@@ -22,6 +24,8 @@ def _trainable_parameters(bundle: Mapping[str, Any]) -> list[torch.nn.Parameter]
 
 def set_training_modes(bundle: Mapping[str, Any], loss_fn) -> None:
     bundle["unet"].train()
+    if bundle.get("age_delta_conditioner") is not None:
+        bundle["age_delta_conditioner"].train()
     bundle["vae"].eval()
     bundle["text_encoder"].eval()
     loss_fn.train()
@@ -41,13 +45,25 @@ def _draw_double_prompt(probability: float, generator: torch.Generator | None) -
     return bool(torch.rand((), generator=generator, device=generator_device) < probability)
 
 
+def _format_eta(seconds: float) -> str:
+    total = max(0, int(round(seconds)))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
+
+
 def _component_values(first: dict, second: dict | None, first_weight: float, second_weight: float) -> dict[str, float]:
-    names = ("loss", "loss_diff", "loss_id", "loss_age", "weighted_diff", "weighted_id", "weighted_age")
+    names = (
+        "loss", "loss_diff", "loss_id", "loss_age", "loss_relative_age",
+        "weighted_diff", "weighted_id", "weighted_age", "weighted_relative_age",
+    )
     result = {}
     for name in names:
-        value = first_weight * float(first[name].detach())
+        first_value = first.get(name)
+        value = first_weight * (float(first_value.detach()) if first_value is not None else 0.0)
         if second is not None:
-            value += second_weight * float(second[name].detach())
+            second_value = second.get(name)
+            value += second_weight * (float(second_value.detach()) if second_value is not None else 0.0)
         result["loss_total" if name == "loss" else name] = value
     first_metrics = first["metrics"]
     second_metrics = second["metrics"] if second is not None else None
@@ -60,6 +76,15 @@ def _component_values(first: dict, second: dict | None, first_weight: float, sec
     result["age_mae"] = first_weight * float(first["loss_age"].detach())
     if second is not None:
         result["age_mae"] += second_weight * float(second["loss_age"].detach())
+    first_relative = first.get("loss_relative_age")
+    result["relative_age_mae"] = first_weight * (
+        float(first_relative.detach()) if first_relative is not None else 0.0
+    )
+    if second is not None:
+        second_relative = second.get("loss_relative_age")
+        result["relative_age_mae"] += second_weight * (
+            float(second_relative.detach()) if second_relative is not None else 0.0
+        )
     result["identity_sample_fraction"] = first_metrics["identity_count"] / max(1, first["loss_diff_per_sample"].shape[0]) if "identity_count" in first_metrics else 0.0
     result["age_sample_fraction"] = first_metrics["age_count"] / max(1, first["loss_diff_per_sample"].shape[0]) if "age_count" in first_metrics else 0.0
     return result
@@ -79,6 +104,11 @@ def _update_gap_metrics(tracker: MetricsTracker, batch, loss_out: dict, loss_fn)
         values = loss_out["loss_age_per_sample"].detach().float()
         per_sample[indices] += loss_fn.age_weight * values
         age[indices] = values if loss_fn.age_loss_type == "l1" else values.sqrt()
+    relative_per_sample = loss_out.get("loss_relative_age_per_sample")
+    if relative_per_sample is not None and relative_per_sample.numel():
+        indices = loss_out["auxiliary_indices"]
+        values = relative_per_sample.detach().float()
+        per_sample[indices] += loss_fn.relative_age_weight * values
     deltas = batch["delta_age"].detach()
     for index in range(per_sample.shape[0]):
         gap = bin_name(float(deltas[index]), AGE_GAP_BINS)
@@ -143,6 +173,12 @@ def train_one_epoch(
     processed_batches = processed_samples = skipped_nonfinite = skipped_updates = double_prompt_batches = 0
     consecutive_nonfinite = 0
     start = time.perf_counter()
+    if log_every:
+        print(f" Epoch {epoch + 1:02d} - training progress")
+        print(
+            "   batch       done    opt.step   total     diffusion  identity  age.abs  age.rel  "
+            "grad     LoRA lr    samples/s   ETA"
+        )
     while processed_batches < total_batches:
         if max_optimizer_steps is not None and optimizer_step >= max_optimizer_steps:
             break
@@ -237,11 +273,20 @@ def train_one_epoch(
         tracker.update(optimizer_group_lrs(optimizer), weight=window_samples)
         if log_every and (processed_batches % log_every == 0 or processed_batches == total_batches):
             current = tracker.averages()
+            elapsed_now = max(time.perf_counter() - start, 1e-9)
+            batches_per_second = processed_batches / elapsed_now
+            eta = (total_batches - processed_batches) / max(batches_per_second, 1e-9)
+            progress = 100.0 * processed_batches / max(total_batches, 1)
             print(
-                f"Epoch {epoch + 1} | batch {processed_batches}/{total_batches} | opt {optimizer_step} | "
-                f"loss {current.get('loss_total', float('nan')):.4f} | diff {current.get('loss_diff', float('nan')):.4f} | "
-                f"id {current.get('loss_id', float('nan')):.4f} | age {current.get('loss_age', float('nan')):.3f} | "
-                f"grad {current.get('grad_norm', float('nan')):.3f}"
+                f"   {processed_batches:04d}/{total_batches:04d}  {progress:6.1f}%  {optimizer_step:8d}  "
+                f"{current.get('loss_total', float('nan')):8.4f}  "
+                f"{current.get('loss_diff', float('nan')):9.4f}  "
+                f"{current.get('loss_id', float('nan')):8.4f}  "
+                f"{current.get('loss_age', float('nan')):7.3f}  "
+                f"{current.get('loss_relative_age', float('nan')):7.3f}  "
+                f"{current.get('grad_norm', float('nan')):7.3f}  "
+                f"{current.get('lr_adapter', float('nan')):9.2e}  "
+                f"{processed_samples / elapsed_now:9.2f}  {_format_eta(eta):>8}"
             )
     elapsed = time.perf_counter() - start
     metrics = tracker.averages(prefix="train")

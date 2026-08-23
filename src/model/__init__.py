@@ -2,6 +2,12 @@
 
 from .DoRa import DoRALinear, inject_manual_dora_unet
 from .LoRa import DEFAULT_ATTENTION_TARGETS, LoRALinear, inject_manual_lora_unet
+from .age_conditioning import (
+    AgeConditionedTimeEmbedding,
+    AgeDeltaConditioner,
+    compute_age_delta_embedding,
+    infer_unet_time_embedding_dim,
+)
 from .load_diffusion_models import (
     DEFAULT_EXTERNAL_VAE_ID,
     DEFAULT_MODEL_ID,
@@ -13,6 +19,7 @@ from .load_diffusion_models import (
     encode_images_to_latents,
     encode_prompts,
     expand_unet_conv_in_for_source_conditioning,
+    get_bundle_trainable_named_parameters,
     load_face_aging_adapter,
     prepare_source_target_latents,
     save_face_aging_adapter,

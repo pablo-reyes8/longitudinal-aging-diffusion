@@ -9,7 +9,7 @@ from typing import Any, Mapping, Sequence
 
 import torch
 
-from src.model import build_face_aging_optimizer
+from src.model import build_face_aging_optimizer, get_bundle_trainable_named_parameters
 
 from .checkpoints import (
     TrainingCheckpointManager,
@@ -46,12 +46,14 @@ def _enable_memory_features(bundle, *, gradient_checkpointing: bool, enable_xfor
                 method()
                 report["xformers"] = "enabled"
             except Exception as exc:
-                report["xformers"] = f"unavailable: {exc}"
+                report["xformers"] = f"unavailable ({type(exc).__name__})"
     return report
 
 
 def _move_training_objects(bundle, loss_fn, device: torch.device) -> None:
     bundle["unet"].to(device)
+    if bundle.get("age_delta_conditioner") is not None:
+        bundle["age_delta_conditioner"].to(device)
     bundle["vae"].to(device)
     bundle["text_encoder"].to(device)
     loss_fn.to(device)
@@ -93,6 +95,13 @@ def _dataset_identity_count(loader) -> int | None:
     return len({record.person_id for record in manifest})
 
 
+def _format_duration(seconds: float) -> str:
+    total = max(0, int(round(seconds)))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
+
+
 def train_model(
     *,
     bundle: Mapping[str, Any],
@@ -103,10 +112,18 @@ def train_model(
     max_train_steps: int | None = None,
     optimizer=None,
     lr_scheduler=None,
-    lr_lora: float = 5e-5,
-    lr_conv_in: float = 1e-5,
+    lr_lora: float = 3e-5,
+    lr_conv_in: float = 5e-6,
+    lr_age_conditioner: float = 1e-4,
     weight_decay: float = 1e-2,
     conv_in_weight_decay: float = 1e-2,
+    age_conditioner_weight_decay: float = 1e-2,
+    use_age_delta_conditioning: bool | None = None,
+    age_conditioning_mode: str = "delta_mlp",
+    age_delta_scale: float = 80.0,
+    use_relative_age_loss: bool | None = None,
+    relative_age_weight: float | None = None,
+    relative_age_loss_type: str | None = None,
     warmup_ratio: float = 0.05,
     min_lr_ratio: float = 0.10,
     grad_accum_steps: int = 4,
@@ -152,7 +169,7 @@ def train_model(
     monitoring_mode: str = "direct",
     monitoring_use_inverse_diffusion: bool | None = None,
     monitoring_num_inference_steps: int = 30,
-    monitoring_strength: float = 0.45,
+    monitoring_strength: float = 0.35,
     monitoring_text_guidance_scale: float = 7.0,
     monitoring_image_guidance_scale: float = 1.5,
     monitoring_seed: int = 2026,
@@ -194,7 +211,34 @@ def train_model(
     precision = setup_device_and_precision(device, amp_enabled=amp_enabled, amp_dtype=amp_dtype, scaler=scaler)
     resolved_device = precision["device"]
     _move_training_objects(bundle, loss_fn, resolved_device)
-    trainables = [parameter for parameter in bundle["unet"].parameters() if parameter.requires_grad]
+    bundle_age_enabled = bool(bundle.get("use_age_delta_conditioning", False))
+    requested_age_enabled = bundle_age_enabled if use_age_delta_conditioning is None else bool(use_age_delta_conditioning)
+    if requested_age_enabled != bundle_age_enabled:
+        raise ValueError(
+            "use_age_delta_conditioning must match the already constructed bundle; rebuild the bundle"
+        )
+    if requested_age_enabled:
+        if age_conditioning_mode != bundle.get("age_conditioning_mode"):
+            raise ValueError("age_conditioning_mode does not match the bundle")
+        if not math.isclose(float(age_delta_scale), float(bundle.get("age_delta_scale"))):
+            raise ValueError("age_delta_scale does not match the bundle")
+        if monitoring_image is not None and monitoring_source_age is None:
+            raise ValueError(
+                "monitoring_source_age is required when the bundle uses age-delta conditioning"
+            )
+    if use_relative_age_loss is not None:
+        loss_fn.use_relative_age_loss = bool(use_relative_age_loss)
+    if relative_age_weight is not None:
+        if relative_age_weight < 0:
+            raise ValueError("relative_age_weight must be non-negative")
+        loss_fn.relative_age_weight = float(relative_age_weight)
+    if relative_age_loss_type is not None:
+        if relative_age_loss_type not in {"l1", "mse"}:
+            raise ValueError("relative_age_loss_type must be 'l1' or 'mse'")
+        loss_fn.relative_age_loss_type = relative_age_loss_type
+    if loss_fn.use_relative_age_loss and loss_fn.relative_age_weight > 0 and loss_fn.age_estimator is None:
+        raise ValueError("Enabled relative age loss requires an age estimator")
+    trainables = [parameter for _, parameter in get_bundle_trainable_named_parameters(bundle)]
     ensure_trainable_parameters_fp32(trainables)
     memory_features = _enable_memory_features(
         bundle, gradient_checkpointing=gradient_checkpointing, enable_xformers=enable_xformers
@@ -202,7 +246,22 @@ def train_model(
     if optimizer is None:
         optimizer = build_face_aging_optimizer(
             bundle, lr_lora=lr_lora, lr_conv_in=lr_conv_in,
+            lr_age_conditioner=lr_age_conditioner,
             weight_decay=weight_decay, conv_in_weight_decay=conv_in_weight_decay,
+            age_conditioner_weight_decay=age_conditioner_weight_decay,
+        )
+    expected_parameter_ids = {id(parameter) for parameter in trainables}
+    optimizer_parameter_ids = {
+        id(parameter)
+        for group in optimizer.param_groups
+        for parameter in group["params"]
+    }
+    missing_parameter_ids = expected_parameter_ids - optimizer_parameter_ids
+    unexpected_parameter_ids = optimizer_parameter_ids - expected_parameter_ids
+    if missing_parameter_ids or unexpected_parameter_ids:
+        raise ValueError(
+            "Optimizer parameters must exactly match all bundle trainables; "
+            f"missing={len(missing_parameter_ids)}, unexpected={len(unexpected_parameter_ids)}"
         )
     loss_fn.min_snr_gamma = float(min_snr_gamma) if min_snr_gamma is not None else None
     loss_fn.auxiliary_max_timestep = auxiliary_max_timestep
@@ -224,7 +283,15 @@ def train_model(
         "training_samples": len(train_loader.dataset), "training_identities": training_identity_count,
         "effective_batch_size": effective_batch_size,
         "lr_lora": lr_lora, "lr_conv_in": lr_conv_in,
+        "lr_age_conditioner": lr_age_conditioner,
         "weight_decay": weight_decay, "conv_in_weight_decay": conv_in_weight_decay,
+        "age_conditioner_weight_decay": age_conditioner_weight_decay,
+        "use_age_delta_conditioning": requested_age_enabled,
+        "age_conditioning_mode": bundle.get("age_conditioning_mode"),
+        "age_delta_scale": bundle.get("age_delta_scale"),
+        "use_relative_age_loss": loss_fn.use_relative_age_loss,
+        "relative_age_weight": loss_fn.relative_age_weight,
+        "relative_age_loss_type": loss_fn.relative_age_loss_type,
         "warmup_ratio": warmup_ratio, "warmup_steps": warmup_steps, "min_lr_ratio": min_lr_ratio,
         "max_grad_norm": max_grad_norm,
         "conditioning_dropout_prob": conditioning_dropout_prob,
@@ -248,14 +315,79 @@ def train_model(
         "monitoring_target_ages": monitoring_ages,
         "monitoring_compute_diagnostics": bool(monitoring_compute_diagnostics),
     }
-    print("\n========== FACE AGING TRAINING ==========")
-    print(f"device={resolved_device} | AMP={precision['amp_dtype_name']} | trainable tensors={len(trainables)}")
-    print(f"batches/epoch={batches_per_epoch} | optimizer steps/epoch={steps_per_epoch} | planned steps={total_planned_steps}")
-    print(f"training samples={len(train_loader.dataset)} | training identities={training_identity_count if training_identity_count is not None else 'unknown'}")
-    print(f"effective batch size={effective_batch_size} | timestep range={min_train_timestep}-{max_train_timestep if max_train_timestep is not None else 'T-1'}")
-    print(f"LR LoRA={lr_lora:.2e} | conv_in={lr_conv_in:.2e} | Min-SNR={min_snr_gamma} | condition dropout={conditioning_dropout_prob:.3f}")
-    print(f"gradient checkpointing={memory_features['gradient_checkpointing']} | xFormers={memory_features['xformers']}")
     root = Path(checkpoint_dir) if checkpoint_dir is not None else None
+    trainable_parameters = sum(parameter.numel() for parameter in trainables)
+    timestep_end = (
+        max_train_timestep
+        if max_train_timestep is not None
+        else len(bundle["scheduler_train"].alphas_cumprod) - 1
+    )
+    identity_count_text = training_identity_count if training_identity_count is not None else "unknown"
+    checkpoint_text = str(root) if root is not None else "disabled"
+    monitoring_text = (
+        f"every {sample_every_epochs} epoch(s), mode={resolved_monitoring_mode}, "
+        f"strength={monitoring_strength}, ages={monitoring_ages}, seed={monitoring_seed}"
+        if monitoring_image is not None else "disabled"
+    )
+    print("\n" + "=" * 104)
+    print(" FACE AGING TRAINING")
+    print("=" * 104)
+    print(
+        f" Runtime       device={resolved_device} | precision={precision['amp_dtype_name']} | "
+        f"seed={seed} | deterministic={deterministic}"
+    )
+    print(
+        f" Dataset       samples={len(train_loader.dataset):,} | identities={identity_count_text} | "
+        f"batches/epoch={batches_per_epoch} | effective_batch={effective_batch_size}"
+    )
+    adapter_config = bundle.get("adapter_config", {})
+    print(
+        f" Model         backbone={bundle.get('model_id', 'unknown')} | "
+        f"adapter={bundle.get('adapter_type', 'unknown').upper()} r={adapter_config.get('rank', 'n/a')} "
+        f"alpha={adapter_config.get('alpha', 'n/a')} | image_size={image_size}"
+    )
+    print(
+        f" Trainable     {trainable_parameters:,} params in {len(trainables)} tensors | "
+        f"source_conditioning={bundle.get('source_conditioning')} | "
+        f"delta_conditioning={requested_age_enabled} (scale={bundle.get('age_delta_scale')})"
+    )
+    print(
+        f" Optimization  epochs={epochs_to_run} | steps/epoch={steps_per_epoch} | total_steps={total_planned_steps} | "
+        f"accumulation={grad_accum_steps} | clip_norm={max_grad_norm}"
+    )
+    print(
+        f" Learning rate LoRA={lr_lora:.2e} | conv_in={lr_conv_in:.2e} | age_mlp={lr_age_conditioner:.2e} | "
+        f"warmup={warmup_steps} steps | min_lr_ratio={min_lr_ratio:.2f}"
+    )
+    print(
+        f" Objective     diffusion={loss_fn.diffusion_weight:g} | identity={loss_fn.identity_weight:g} | "
+        f"age_abs={loss_fn.age_weight:g} | age_relative={loss_fn.relative_age_weight:g} "
+        f"({'on' if loss_fn.use_relative_age_loss else 'off'}) | Min-SNR={min_snr_gamma}"
+    )
+    print(
+        f" Sampling      timesteps={min_train_timestep}-{timestep_end} ({timestep_sampling}) | "
+        f"cond_dropout={conditioning_dropout_prob:.3f} | source_posterior={'sample' if sample_source_posterior else 'mean'} | "
+        f"target_posterior={'sample' if sample_target_posterior else 'mean'}"
+    )
+    print(
+        f" Aux losses    every={loss_fn.auxiliary_every_n_steps} microbatch(es) | "
+        f"sample_fraction={loss_fn.auxiliary_sample_fraction:.2f} | max_timestep={auxiliary_max_timestep}"
+    )
+    print(
+        f" Memory        gradient_checkpointing={memory_features['gradient_checkpointing']} | "
+        f"xFormers={memory_features['xformers']}"
+    )
+    print(
+        f" Validation    every={validate_every_epochs} epoch(s) | deterministic={deterministic_validation} | "
+        f"monitor={monitor} ({monitor_mode})"
+    )
+    print(f" Monitoring    {monitoring_text}")
+    print(f" Checkpoints   path={checkpoint_text}")
+    print(
+        f"               save_every={save_every_epochs} epoch(s) | keep_last={max_epoch_checkpoints} | "
+        f"resume={resume_from or 'none'}"
+    )
+    print("=" * 104 + "\n")
     manager = TrainingCheckpointManager(
         root, monitor=monitor, mode=monitor_mode,
         save_epoch_checkpoints=save_epoch_checkpoints,
@@ -283,7 +415,7 @@ def train_model(
         if manager is not None:
             manager.best_metric = payload.get("best_metric")
             manager.best_epoch = payload.get("best_epoch")
-        print(f"Resumed epoch={start_epoch}, global_step={global_step}, optimizer_step={optimizer_step}")
+        print(f"[resume] epoch={start_epoch + 1}  global_step={global_step}  optimizer_step={optimizer_step}")
     last_epoch = start_epoch - 1
     try:
         for epoch in range(start_epoch, epochs_to_run):
@@ -385,8 +517,29 @@ def train_model(
                 )
             epoch_record["checkpoint"] = checkpoint_report
             epoch_record["sampling"] = sampling_report
-            validation_text = val_result["metrics"].get("val/loss_total") if val_result else None
-            print(f"Epoch {epoch + 1}/{epochs_to_run} complete | train={train_result['metrics'].get('train/loss_total'):.4f} | val={validation_text if validation_text is not None else 'NOT RUN'} | opt={optimizer_step}")
+            validation_value = val_result["metrics"].get("val/loss_total") if val_result else None
+            validation_text = f"{validation_value:.4f}" if validation_value is not None else "not_run"
+            epoch_duration = float(epoch_record["duration_seconds"])
+            checkpoint_status = "not scheduled"
+            if checkpoint_report is not None:
+                checkpoint_status = "saved"
+                if checkpoint_report.get("improved"):
+                    checkpoint_status += " (new best)"
+            sampling_status = "saved" if sampling_report is not None else "not scheduled"
+            print("-" * 104)
+            print(
+                f" Epoch {epoch + 1:02d}/{epochs_to_run:02d} complete  |  "
+                f"train_loss={train_result['metrics'].get('train/loss_total'):.4f}  |  "
+                f"val_loss={validation_text}  |  optimizer_step={optimizer_step}  |  "
+                f"duration={_format_duration(epoch_duration)}"
+            )
+            best_value = manager.best_metric if manager is not None else None
+            best_text = f"{best_value:.6f}" if best_value is not None else "n/a"
+            print(
+                f" Checkpoint: {checkpoint_status}  |  Monitoring: {sampling_status}  |  "
+                f"Best {monitor}: {best_text}"
+            )
+            print("-" * 104 + "\n")
     except KeyboardInterrupt:
         if root is not None:
             emergency = build_training_payload(

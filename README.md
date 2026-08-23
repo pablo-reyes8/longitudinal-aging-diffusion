@@ -3,11 +3,12 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-EE4C2C?logo=pytorch&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Tests](https://img.shields.io/badge/tests-194%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-201%20passed-brightgreen)
 
 Supervised photo aging from real longitudinal observations. The project adapts
-Stable Diffusion 1.5 with source-image conditioning and lightweight LoRA/DoRA
-attention adapters, while keeping the VAE and CLIP text encoder frozen.
+Stable Diffusion 1.5 with source-image conditioning, explicit relative-age
+conditioning, and lightweight LoRA/DoRA attention adapters, while keeping the
+VAE and CLIP text encoder frozen.
 
 > Status: research pipeline. Data loading, model adaptation, numerical loss,
 > mixed-precision training, checkpointing, direct inference, and deterministic
@@ -21,17 +22,17 @@ This gives the model a direct aging target while identity-disjoint splits preven
 the same person from appearing in training and evaluation.
 
 ```text
-source photograph + target-age prompt
-                 │
-          VAE / CLIP encoding
-                 │
-  source latent + noisy target latent
-                 │
-       SD1.5 U-Net + LoRA/DoRA
-                 │
-  diffusion + identity + age objectives
-                 │
-       direct or DDIM-inverse edit
+source photograph + target-age prompt + (target age - source age)
+                          │
+           VAE / CLIP / age-delta MLP
+                          │
+       source latent + noisy target latent
+                          │
+            SD1.5 U-Net + LoRA/DoRA
+                          │
+ diffusion + identity + absolute/relative age objectives
+                          │
+            direct or DDIM-inverse edit
 ```
 
 ## Repository layout
@@ -41,7 +42,7 @@ config/               YAML presets for data, models, training, and inference
 data/                 Longitudinal indexing, pairing, datasets, and loaders
 notebooks/            Guided server workflows
 scripts/              Data, training, and inference CLI entry points
-src/model/            SD1.5 loading, 8-channel conditioning, LoRA and DoRA
+src/model/            SD1.5 loading, image/age conditioning, LoRA and DoRA
 src/loss/             Composite supervised diffusion objective
 src/training/         Mixed-precision loop, validation, monitoring, checkpoints
 src/inference/        Direct editing, three-way CFG, and DDIM inversion
@@ -121,12 +122,15 @@ aging-train \
   --model-config config/models/sd15_lora.yaml \
   --training-config config/training/photo_editing.yaml \
   --checkpoint-dir /server/checkpoints/face_aging \
-  --monitoring-image /server/monitor/fixed_face.jpg
+  --monitoring-image /server/monitor/fixed_face.jpg \
+  --monitoring-source-age 26
 ```
 
-The baseline uses conservative photo-editing hyperparameters: LoRA `5e-5`,
-expanded input convolution `1e-5`, Min-SNR 5, 5% conditioning dropout, fixed
-monitoring seed, and DDIM-inverse monitoring. It loads frozen
+The baseline uses conservative photo-editing hyperparameters: LoRA `3e-5`,
+expanded input convolution `5e-6`, age-delta MLP `1e-4`, Min-SNR 5, 5%
+conditioning dropout, a fixed monitoring seed, direct monitoring at strength
+`0.35`, and loss weights `identity=0.20`, `absolute_age=0.05`,
+`relative_age=0.05`. It loads frozen
 `py-feat/arcface_r50` and `iitolstykh/mivolo_v2` auxiliaries. To control VRAM,
 their losses run every fourth training microbatch on 25% of eligible samples and use
 activation checkpointing through the VAE and auxiliary networks. See
@@ -135,8 +139,8 @@ Training images should already be face-centered or aligned: a non-differentiable
 face detector is intentionally not inserted into the loss graph.
 
 Training monitoring accepts either one age or an ordered sweep. With
-`monitoring_target_age=[30, 40, 50, 65]`, every sampled epoch writes
-`age_030.png`, `age_040.png`, `age_050.png`, `age_065.png`, and
+`monitoring_target_age=[30, 35, 40, 50, 65]`, every sampled epoch writes
+`age_030.png`, `age_035.png`, `age_040.png`, `age_050.png`, `age_065.png`, and
 `age_sweep.png` below `monitoring/epoch_NNN/`. The source image, seed, mode, and
 guidance settings remain fixed across ages and epochs.
 When ArcFace and MiVOLO are attached, monitoring also annotates the grid with
@@ -158,6 +162,7 @@ aging-train \
 aging-infer \
   --checkpoint /server/checkpoints/face_aging/best/adapter_inference.pt \
   --image /server/input/person.jpg \
+  --source-age 26 \
   --target-age 65 \
   --mode inverse \
   --output /server/outputs/person_age_65.png
@@ -169,12 +174,14 @@ An explicit prompt can replace `--target-age`:
 aging-infer \
   --checkpoint checkpoint.pt \
   --image person.jpg \
+  --source-age 26 \
   --target-prompt "photo of a person as 70-year-old" \
   --mode direct \
   --output aged.png
 ```
 
-Inference accepts both lightweight adapter checkpoints and full training-resume
+New relative-age checkpoints require both source and target ages at inference;
+the numerical condition is their signed difference. Inference accepts both lightweight adapter checkpoints and full training-resume
 checkpoints; optimizer, loader, and GradScaler state are not needed.
 `diagnose_checkpoint_age_sweep` loads either checkpoint format and returns a
 pandas DataFrame with predicted age, signed age error, and identity cosine while
@@ -195,6 +202,7 @@ loaders, metadata = build_face_aging_dataloaders(
 result = infer_face_aging(
     bundle=bundle,
     image="person.jpg",
+    source_age=26,
     target_age=65,
     use_inverse_diffusion=True,
     seed=42,

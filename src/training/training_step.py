@@ -7,7 +7,12 @@ from typing import Any, Mapping, Sequence
 import torch
 
 from src.loss import get_diffusion_target
-from src.model import build_conditioned_unet_input, encode_images_to_latents, encode_prompts
+from src.model import (
+    build_conditioned_unet_input,
+    compute_age_delta_embedding,
+    encode_images_to_latents,
+    encode_prompts,
+)
 
 from .conditioning_dropout import (
     apply_conditioning_dropout,
@@ -149,12 +154,22 @@ def run_training_step(
     identity_mask = None
     if not identity_loss_on_image_dropped_samples:
         identity_mask = ~prepared["dropout_masks"]["image_dropped"]
+    age_conditioning = compute_age_delta_embedding(
+        bundle,
+        batch.get("delta_age"),
+        batch_size=prepared["target_latents"].shape[0],
+    )
+    unet_kwargs = {
+        "encoder_hidden_states": conditioned_text,
+        "return_dict": True,
+    }
+    if age_conditioning is not None:
+        unet_kwargs["timestep_cond"] = age_conditioning
     with autocast_ctx(device, enabled=amp_enabled, amp_dtype=amp_dtype):
         model_pred = bundle["unet"](
             model_input,
             prepared["timesteps"],
-            encoder_hidden_states=conditioned_text,
-            return_dict=True,
+            **unet_kwargs,
         ).sample
         # Autocast may emit BF16/FP16 while VAE latents are stored in FP32.
         # Compute the objective in latent storage precision; the cast remains
@@ -168,7 +183,9 @@ def run_training_step(
             timesteps=prepared["timesteps"],
             source_images=prepared["source_images"],
             target_images=prepared["target_images"],
+            source_ages=batch.get("source_age"),
             target_ages=batch["target_age"],
+            delta_ages=batch.get("delta_age"),
             identity_sample_mask=identity_mask,
             global_step=global_step,
             return_per_sample=True,
@@ -193,5 +210,6 @@ def run_training_step(
             "model_pred_compute_dtype": model_pred.dtype,
             "conditioned_text": conditioned_text,
             "conditioned_source_latents": conditioned_source,
+            "age_conditioning": age_conditioning,
         }
     return result

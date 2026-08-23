@@ -7,12 +7,14 @@ from typing import Any, Mapping
 
 import torch
 
-from src.model import build_face_aging_diffusion_bundle
+from src.model import build_face_aging_diffusion_bundle, get_bundle_trainable_named_parameters
 
 
 PROTECTED_KEYS = (
     "model_id", "adapter_type", "rank", "target_modules",
     "source_conditioning", "unet_in_channels", "unet_cross_attention_dim",
+    "use_age_delta_conditioning", "age_conditioning_mode", "age_delta_scale",
+    "age_condition_hidden_dim", "age_condition_output_dim",
 )
 
 
@@ -43,7 +45,7 @@ def load_face_aging_adapter_for_inference(
     if strict_config and mismatches:
         raise ValueError(f"Inference checkpoint is incompatible with bundle: {mismatches}")
     state = _checkpoint_weights(payload)
-    parameters = dict(bundle["unet"].named_parameters())
+    parameters = dict(get_bundle_trainable_named_parameters(bundle))
     expected = set(bundle.get("trainable_param_names", [name for name, parameter in parameters.items() if parameter.requires_grad]))
     if set(state) != expected:
         raise ValueError(f"Checkpoint trainable keys mismatch: missing={sorted(expected-set(state))}, unexpected={sorted(set(state)-expected)}")
@@ -91,6 +93,11 @@ def load_face_aging_inference_bundle(
         adapter_type=config.get("adapter_type", "lora"),
         rank=rank, alpha=alpha, dropout=dropout,
         source_conditioning=config.get("source_conditioning", "concat"),
+        use_age_delta_conditioning=config.get("use_age_delta_conditioning", False),
+        age_conditioning_mode=config.get("age_conditioning_mode", "delta_mlp"),
+        age_delta_scale=config.get("age_delta_scale", 80.0),
+        age_condition_hidden_dim=config.get("age_condition_hidden_dim", 128),
+        age_condition_output_dim=config.get("age_condition_output_dim"),
         device=device, dtype=dtype,
         local_files_only=local_files_only, token=token,
         **model_loading_kwargs,

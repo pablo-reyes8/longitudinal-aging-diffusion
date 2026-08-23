@@ -90,6 +90,7 @@ def ddim_invert_source_image(
     image_guidance_scale: float = 1.0,
     negative_prompt: str = "",
     use_cfg: bool = True,
+    age_conditioning: torch.Tensor | None = None,
     return_intermediates: bool = False,
 ) -> dict[str, Any]:
     if not 0 < inversion_strength <= 1:
@@ -117,6 +118,7 @@ def ddim_invert_source_image(
             text_guidance_scale=text_guidance_scale,
             image_guidance_scale=image_guidance_scale,
             use_cfg=use_cfg,
+            age_conditioning=age_conditioning,
         )
         latents = ddim_forward_step(
             latents, prediction.to(latents.dtype), int(current_t), int(next_t), scheduler
@@ -145,6 +147,7 @@ def edit_from_inverted_latent(
     image_guidance_scale: float = 1.5,
     negative_prompt: str = "",
     use_cfg: bool = True,
+    age_conditioning: torch.Tensor | None = None,
     generator=None,
     return_intermediates: bool = False,
 ) -> dict[str, Any]:
@@ -164,6 +167,7 @@ def edit_from_inverted_latent(
             text_guidance_scale=text_guidance_scale,
             image_guidance_scale=image_guidance_scale,
             use_cfg=use_cfg,
+            age_conditioning=age_conditioning,
         ).to(latents.dtype)
         guided_norms.append(float(prediction.float().norm()))
         latents = scheduler_reverse_step(scheduler, prediction, timestep, latents, generator)

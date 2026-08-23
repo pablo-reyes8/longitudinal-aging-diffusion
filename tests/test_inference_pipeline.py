@@ -123,7 +123,7 @@ def test_source_and_prompt_conditioning_are_causally_active():
 def test_comparison_grid_and_age_sweep_order(tmp_path):
     bundle = make_training_bundle()
     comparison = compare_inference_modes(
-        bundle=bundle, image=source_image(), target_age=65,
+        bundle=bundle, image=source_image(), source_age=30, target_age=65,
         num_inference_steps=4, strength=0.5, image_size=32, seed=1,
         output_path=tmp_path / "comparison.png",
     )
@@ -131,7 +131,7 @@ def test_comparison_grid_and_age_sweep_order(tmp_path):
     assert (tmp_path / "comparison.png").exists()
     sweep = generate_age_sweep(
         bundle=bundle, image=source_image(), ages=[35, 45, 65],
-        mode="direct", num_inference_steps=3, strength=0.5,
+        source_age=30, mode="direct", num_inference_steps=3, strength=0.5,
         image_size=32, seed=1, output_path=tmp_path / "sweep.png",
     )
     assert sweep["ages"] == [35, 45, 65]

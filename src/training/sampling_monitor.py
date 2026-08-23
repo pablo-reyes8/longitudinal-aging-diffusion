@@ -11,7 +11,9 @@ import torch
 
 
 DIAGNOSTIC_CSV_FIELDS = [
-    "epoch", "target_age", "predicted_generated_age", "identity_cosine", "mode", "seed"
+    "epoch", "source_age", "target_age", "target_delta_age", "predicted_source_age",
+    "predicted_generated_age", "predicted_delta_age", "age_error", "delta_age_error",
+    "identity_cosine", "mode", "seed",
 ]
 
 
@@ -21,8 +23,14 @@ def _diagnostic_row(*, epoch: int, result) -> dict | None:
         return None
     return {
         "epoch": int(epoch + 1),
+        "source_age": result.get("source_age"),
         "target_age": diagnostics["target_age"],
+        "target_delta_age": diagnostics["target_delta_age"],
+        "predicted_source_age": diagnostics["predicted_source_age"],
         "predicted_generated_age": diagnostics["predicted_generated_age"],
+        "predicted_delta_age": diagnostics["predicted_delta_age"],
+        "age_error": diagnostics["predicted_generated_age"] - diagnostics["target_age"],
+        "delta_age_error": diagnostics["delta_age_error"],
         "identity_cosine": diagnostics["identity_cosine_source_generated"],
         "mode": result["mode"],
         "seed": result["seed"],
@@ -67,7 +75,7 @@ def run_face_aging_monitor(
     *, bundle, image, epoch: int, output_dir, loss_fn=None, target_prompt=None,
     target_age=None, source_prompt=None, source_age=None,
     mode="direct", use_inverse_diffusion=None, num_inference_steps=30,
-    strength=0.45, text_guidance_scale=7.0, image_guidance_scale=1.5,
+    strength=0.35, text_guidance_scale=7.0, image_guidance_scale=1.5,
     seed=2026, image_size=256, compute_diagnostics: bool = True,
 ):
     """Generate one edit or an ordered age sweep from the same fixed image."""

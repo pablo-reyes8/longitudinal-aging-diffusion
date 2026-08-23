@@ -75,9 +75,11 @@ def test_cpu_bf16_smoke_backward_keeps_objective_and_gradients_finite():
     output = result["loss_out"]
     output["loss"].backward()
     gradients = [p.grad for p in bundle["unet"].parameters() if p.requires_grad]
+    age_gradients = [p.grad for p in bundle["age_delta_conditioner"].parameters()]
     assert result["debug"]["model_pred_compute_dtype"] == torch.bfloat16
     assert torch.isfinite(output["loss"])
     assert all(gradient is not None and torch.isfinite(gradient).all() for gradient in gradients)
+    assert all(gradient is not None and torch.isfinite(gradient).all() for gradient in age_gradients)
 
 
 def test_validation_is_deterministic_and_mutates_no_parameter(tiny_root):
