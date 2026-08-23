@@ -90,3 +90,19 @@ server call to `TRAIN_AGGING_MODEL`.
 pytest -q tests/test_training_*.py
 python tests/run_training_pipeline_validation.py data/sample
 ```
+
+## Inference
+
+`src/inference` exposes deterministic direct img2img and DDIM-inversion editing
+through `infer_face_aging`. It supports a numeric target age or explicit prompt,
+three-way text/image classifier-free guidance, inference and training-resume
+checkpoints, direct-vs-inverse grids, age sweeps, and training-time monitoring
+of the same fixed photograph across epochs.
+
+Use `notebooks/inference.ipynb` for the complete checkpoint-to-image server
+workflow. The main switch is `use_inverse_diffusion=True`.
+
+```bash
+pytest -q tests/test_inference_*.py
+python tests/run_inference_pipeline_validation.py
+```

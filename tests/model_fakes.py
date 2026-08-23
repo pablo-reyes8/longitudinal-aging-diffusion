@@ -133,6 +133,9 @@ class FakeScheduler:
         )
         betas = torch.linspace(0.0001, 0.02, num_train_timesteps)
         self.alphas_cumprod = torch.cumprod(1.0 - betas, dim=0)
+        self.final_alpha_cumprod = torch.tensor(1.0)
+        self.num_inference_steps = None
+        self.timesteps = None
 
     def add_noise(self, latents, noise, timesteps):
         alpha = self.alphas_cumprod.to(latents)[timesteps].view(-1, 1, 1, 1)
@@ -141,6 +144,28 @@ class FakeScheduler:
     def get_velocity(self, latents, noise, timesteps):
         alpha = self.alphas_cumprod.to(latents)[timesteps].view(-1, 1, 1, 1)
         return alpha.sqrt() * noise - (1 - alpha).sqrt() * latents
+
+    def set_timesteps(self, num_inference_steps, device=None):
+        self.num_inference_steps = int(num_inference_steps)
+        ratio = self.config.num_train_timesteps // self.num_inference_steps
+        self.timesteps = (torch.arange(self.num_inference_steps) * ratio).flip(0).long().to(device=device)
+
+    def scale_model_input(self, sample, timestep):
+        return sample
+
+    def step(self, model_output, timestep, sample, eta=0.0, generator=None):
+        timestep = int(timestep)
+        previous = timestep - self.config.num_train_timesteps // self.num_inference_steps
+        alpha_t = self.alphas_cumprod.to(sample)[timestep]
+        alpha_previous = self.alphas_cumprod.to(sample)[previous] if previous >= 0 else self.final_alpha_cumprod.to(sample)
+        if self.config.prediction_type == "epsilon":
+            epsilon = model_output
+            x0 = (sample - (1 - alpha_t).sqrt() * epsilon) / alpha_t.sqrt()
+        else:
+            x0 = alpha_t.sqrt() * sample - (1 - alpha_t).sqrt() * model_output
+            epsilon = alpha_t.sqrt() * model_output + (1 - alpha_t).sqrt() * sample
+        previous_sample = alpha_previous.sqrt() * x0 + (1 - alpha_previous).sqrt() * epsilon
+        return SimpleNamespace(prev_sample=previous_sample, pred_original_sample=x0)
 
 
 def make_fake_components():

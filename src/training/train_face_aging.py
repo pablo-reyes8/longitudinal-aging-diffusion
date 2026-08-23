@@ -20,7 +20,7 @@ from .checkpoints import (
     load_training_checkpoint,
 )
 from .mixed_precision import ensure_trainable_parameters_fp32, setup_device_and_precision
-from .sampling_monitor import sample_monitoring_images
+from .sampling_monitor import run_face_aging_monitor, sample_monitoring_images
 from .scheduler_warmup import WarmupCosineLR, compute_warmup_steps, estimate_optimizer_steps
 from .seed import set_seed
 from .train_one_epoch import train_one_epoch
@@ -144,6 +144,18 @@ def train_model(
     sample_every_epochs: int = 1,
     sample_fn=None,
     monitoring_dir: str | Path | None = None,
+    monitoring_image=None,
+    monitoring_target_prompt: str | None = None,
+    monitoring_target_age: int | None = None,
+    monitoring_source_prompt: str | None = None,
+    monitoring_source_age: int | None = None,
+    monitoring_mode: str = "direct",
+    monitoring_use_inverse_diffusion: bool | None = None,
+    monitoring_num_inference_steps: int = 30,
+    monitoring_strength: float = 0.45,
+    monitoring_text_guidance_scale: float = 7.0,
+    monitoring_image_guidance_scale: float = 1.5,
+    monitoring_seed: int = 2026,
     log_every: int = 25,
     seed: int = 42,
     deterministic: bool = False,
@@ -164,6 +176,14 @@ def train_model(
     )
     if validate_every_epochs <= 0 or save_every_epochs <= 0:
         raise ValueError("validation/save epoch intervals must be positive")
+    if monitoring_image is not None and checkpoint_dir is None and monitoring_dir is None:
+        raise ValueError("Built-in monitoring requires monitoring_dir or checkpoint_dir")
+    if monitoring_image is not None and monitoring_target_prompt is None and monitoring_target_age is None:
+        raise ValueError("Built-in monitoring requires monitoring_target_prompt or monitoring_target_age")
+    resolved_monitoring_mode = (
+        ("inverse" if monitoring_use_inverse_diffusion else "direct")
+        if monitoring_use_inverse_diffusion is not None else monitoring_mode
+    )
     set_seed(seed, deterministic=deterministic)
     precision = setup_device_and_precision(device, amp_enabled=amp_enabled, amp_dtype=amp_dtype, scaler=scaler)
     resolved_device = precision["device"]
@@ -215,6 +235,10 @@ def train_model(
         "amp_dtype": precision["amp_dtype_name"], "gradient_checkpointing": gradient_checkpointing,
         "enable_xformers": enable_xformers, "seed": seed, "deterministic": deterministic,
         "image_size": image_size, "prompt_configuration": prompt_configuration,
+        "monitoring_mode": resolved_monitoring_mode,
+        "monitoring_num_inference_steps": monitoring_num_inference_steps,
+        "monitoring_strength": monitoring_strength,
+        "monitoring_seed": monitoring_seed,
     }
     print("\n========== FACE AGING TRAINING ==========")
     print(f"device={resolved_device} | AMP={precision['amp_dtype_name']} | trainable tensors={len(trainables)}")
@@ -327,12 +351,28 @@ def train_model(
                 )
                 atomic_json_save(history, manager.root_dir / "history.json")
             sampling_report = None
-            if sample_fn is not None and sample_every_epochs > 0 and ((epoch + 1) % sample_every_epochs == 0 or optimizer_step >= total_planned_steps):
+            monitoring_enabled = sample_fn is not None or monitoring_image is not None
+            if monitoring_enabled and sample_every_epochs > 0 and ((epoch + 1) % sample_every_epochs == 0 or optimizer_step >= total_planned_steps):
+                selected_sample_fn = sample_fn
+                if selected_sample_fn is None:
+                    selected_sample_fn = run_face_aging_monitor
                 sampling_report = sample_monitoring_images(
-                    sample_fn, bundle=bundle, loss_fn=loss_fn, val_loader=val_loader,
+                    selected_sample_fn, bundle=bundle, loss_fn=loss_fn, val_loader=val_loader,
                     epoch=epoch, device=resolved_device,
                     output_dir=Path(monitoring_dir) if monitoring_dir else (root / "monitoring" if root else None),
-                    seed=validation_seed,
+                    seed=monitoring_seed,
+                    image=monitoring_image,
+                    target_prompt=monitoring_target_prompt,
+                    target_age=monitoring_target_age,
+                    source_prompt=monitoring_source_prompt,
+                    source_age=monitoring_source_age,
+                    mode=monitoring_mode,
+                    use_inverse_diffusion=monitoring_use_inverse_diffusion,
+                    num_inference_steps=monitoring_num_inference_steps,
+                    strength=monitoring_strength,
+                    text_guidance_scale=monitoring_text_guidance_scale,
+                    image_guidance_scale=monitoring_image_guidance_scale,
+                    image_size=image_size,
                 )
             epoch_record["checkpoint"] = checkpoint_report
             epoch_record["sampling"] = sampling_report
