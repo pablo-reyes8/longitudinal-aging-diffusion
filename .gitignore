@@ -1,0 +1,29 @@
+# Local datasets and private planning notes
+data/sample/
+planing/
+planning/
+
+# Generated dataset indexes
+manifest.csv
+splits.csv
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environments and editors
+.env
+.venv/
+venv/
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
