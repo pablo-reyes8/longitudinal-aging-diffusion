@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-EE4C2C?logo=pytorch&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Tests](https://img.shields.io/badge/tests-182%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-187%20passed-brightgreen)
 
 Supervised photo aging from real longitudinal observations. The project adapts
 Stable Diffusion 1.5 with source-image conditioning and lightweight LoRA/DoRA
@@ -133,6 +133,12 @@ activation checkpointing through the VAE and auxiliary networks. See
 [`notebooks/training.ipynb`](notebooks/training.ipynb) for the complete setup.
 Training images should already be face-centered or aligned: a non-differentiable
 face detector is intentionally not inserted into the loss graph.
+
+Training monitoring accepts either one age or an ordered sweep. With
+`monitoring_target_age=[30, 40, 50, 65]`, every sampled epoch writes
+`age_030.png`, `age_040.png`, `age_050.png`, `age_065.png`, and
+`age_sweep.png` below `monitoring/epoch_NNN/`. The source image, seed, mode, and
+guidance settings remain fixed across ages and epochs.
 
 Resume exactly from a training checkpoint with:
 

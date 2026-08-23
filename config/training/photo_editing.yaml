@@ -32,7 +32,7 @@ deterministic_validation: true
 validation_seed: 2026
 sample_every_epochs: 1
 monitoring_image: null
-monitoring_target_age: 65
+monitoring_target_age: [30, 40, 50, 65]
 monitoring_use_inverse_diffusion: true
 monitoring_num_inference_steps: 30
 monitoring_strength: 0.45

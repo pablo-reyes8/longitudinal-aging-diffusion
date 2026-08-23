@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import torch
 
@@ -20,7 +20,7 @@ from .checkpoints import (
     load_training_checkpoint,
 )
 from .mixed_precision import ensure_trainable_parameters_fp32, setup_device_and_precision
-from .sampling_monitor import run_face_aging_monitor, sample_monitoring_images
+from .sampling_monitor import normalize_monitoring_ages, run_face_aging_monitor, sample_monitoring_images
 from .scheduler_warmup import WarmupCosineLR, compute_warmup_steps, estimate_optimizer_steps
 from .seed import set_seed
 from .train_one_epoch import train_one_epoch
@@ -146,7 +146,7 @@ def train_model(
     monitoring_dir: str | Path | None = None,
     monitoring_image=None,
     monitoring_target_prompt: str | None = None,
-    monitoring_target_age: int | None = None,
+    monitoring_target_age: int | Sequence[int] | None = None,
     monitoring_source_prompt: str | None = None,
     monitoring_source_age: int | None = None,
     monitoring_mode: str = "direct",
@@ -180,6 +180,11 @@ def train_model(
         raise ValueError("Built-in monitoring requires monitoring_dir or checkpoint_dir")
     if monitoring_image is not None and monitoring_target_prompt is None and monitoring_target_age is None:
         raise ValueError("Built-in monitoring requires monitoring_target_prompt or monitoring_target_age")
+    monitoring_ages = None
+    if monitoring_target_age is not None:
+        monitoring_ages, monitoring_is_sweep = normalize_monitoring_ages(monitoring_target_age)
+        if monitoring_is_sweep and monitoring_target_prompt is not None:
+            raise ValueError("monitoring_target_prompt cannot be combined with multiple target ages")
     resolved_monitoring_mode = (
         ("inverse" if monitoring_use_inverse_diffusion else "direct")
         if monitoring_use_inverse_diffusion is not None else monitoring_mode
@@ -239,6 +244,7 @@ def train_model(
         "monitoring_num_inference_steps": monitoring_num_inference_steps,
         "monitoring_strength": monitoring_strength,
         "monitoring_seed": monitoring_seed,
+        "monitoring_target_ages": monitoring_ages,
     }
     print("\n========== FACE AGING TRAINING ==========")
     print(f"device={resolved_device} | AMP={precision['amp_dtype_name']} | trainable tensors={len(trainables)}")

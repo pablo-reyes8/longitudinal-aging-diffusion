@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 from PIL import Image
 
@@ -16,6 +17,7 @@ from src.training import (
     build_inference_payload,
     build_training_payload,
 )
+from src.training.sampling_monitor import normalize_monitoring_ages, run_face_aging_monitor
 from training_fakes import make_training_bundle, make_training_loss
 
 
@@ -88,3 +90,32 @@ def test_training_builtin_inverse_monitor_uses_same_image_and_writes_each_epoch(
     assert all(report["status"] == "PASSED" for report in reports)
     assert all(report["result"]["mode"] == "inverse" for report in reports)
     assert all(report["result"]["seed"] == 444 for report in reports)
+
+
+def test_monitoring_age_list_writes_ordered_images_and_grid(tmp_path):
+    bundle = make_training_bundle(seed=711)
+    image = Image.new("RGB", (40, 32), (120, 80, 50))
+    report = run_face_aging_monitor(
+        bundle=bundle,
+        image=image,
+        epoch=1,
+        output_dir=tmp_path,
+        target_age=[30, 40, 50, 65],
+        source_age=25,
+        use_inverse_diffusion=True,
+        num_inference_steps=3,
+        seed=444,
+        image_size=32,
+    )
+    epoch_dir = tmp_path / "epoch_002"
+    assert report["target_ages"] == [30, 40, 50, 65]
+    assert report["seed"] == 444 and report["mode"] == "inverse"
+    assert (epoch_dir / "age_sweep.png").exists()
+    assert [sample["target_age"] for sample in report["samples"]] == [30, 40, 50, 65]
+    assert all((epoch_dir / f"age_{age:03d}.png").exists() for age in report["target_ages"])
+
+
+@pytest.mark.parametrize("ages", [[], [30, 30], [30, 121], [30, "40"]])
+def test_monitoring_age_list_rejects_ambiguous_or_invalid_values(ages):
+    with pytest.raises(ValueError):
+        normalize_monitoring_ages(ages)
