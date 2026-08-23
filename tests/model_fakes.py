@@ -126,12 +126,21 @@ class FakeUNet(nn.Module):
 
 
 class FakeScheduler:
-    def __init__(self):
-        self.config = SimpleNamespace(num_train_timesteps=100)
+    def __init__(self, prediction_type="epsilon", num_train_timesteps=100):
+        self.config = SimpleNamespace(
+            num_train_timesteps=num_train_timesteps,
+            prediction_type=prediction_type,
+        )
+        betas = torch.linspace(0.0001, 0.02, num_train_timesteps)
+        self.alphas_cumprod = torch.cumprod(1.0 - betas, dim=0)
 
     def add_noise(self, latents, noise, timesteps):
-        amount = (timesteps.float() / 99).view(-1, 1, 1, 1).to(latents)
-        return latents * (1 - amount) + noise * amount
+        alpha = self.alphas_cumprod.to(latents)[timesteps].view(-1, 1, 1, 1)
+        return alpha.sqrt() * latents + (1 - alpha).sqrt() * noise
+
+    def get_velocity(self, latents, noise, timesteps):
+        alpha = self.alphas_cumprod.to(latents)[timesteps].view(-1, 1, 1, 1)
+        return alpha.sqrt() * noise - (1 - alpha).sqrt() * latents
 
 
 def make_fake_components():

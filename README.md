@@ -52,3 +52,23 @@ The validation report checks identity/path leakage, forward-pair correctness aga
 `src/model` builds one SD1.5-compatible bundle with a frozen VAE and CLIP text encoder, an 8-channel source-conditioned U-Net, and manual LoRA (or optional DoRA) attention adapters. The maintained default checkpoint is [`stable-diffusion-v1-5/stable-diffusion-v1-5`](https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5). Model weights are not included in this repository.
 
 On the training server, install `diffusers`, `transformers`, `accelerate`, and `safetensors` in the existing environment, then follow `notebooks/model.ipynb`. Offline model tests use small architecture-compatible doubles and never download weights.
+
+## Training loss
+
+`src/loss` provides the composite supervised aging objective: diffusion MSE for
+epsilon or velocity prediction, optional Min-SNR weighting, differentiable VAE
+reconstruction, frozen identity preservation, and frozen differentiable age
+regression. Auxiliary losses support cadence, deterministic subsampling, and a
+maximum diffusion timestep without changing the primary diffusion objective.
+
+Run the strict numerical and integration suite with:
+
+```bash
+pytest -q tests/test_loss_*.py tests/test_face_aging_loss_composite.py
+python tests/run_face_aging_loss_validation.py /path/to/dataset_root
+```
+
+The tests use independent float64 mathematical oracles, randomized property
+checks, finite differences, gradient decomposition, failure injection, and a
+real loader-to-model-to-loss backward pass. Validation against installed real
+Diffusers classes is optional and never downloads a checkpoint.
