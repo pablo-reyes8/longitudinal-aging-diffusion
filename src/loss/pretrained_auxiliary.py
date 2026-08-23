@@ -22,21 +22,29 @@ def _module_dtype(module: nn.Module) -> torch.dtype:
 
 
 class ArcFaceR50InputAdapter(nn.Module):
-    """Resize differentiably and call py-feat's ArcFace `[0,1]` wrapper."""
+    """Resize differentiably and call py-feat's ArcFace `[0,1]` wrapper.
+
+    py-feat's ArcFace wrapper performs part of its input normalization in
+    float32.  Keeping its BatchNorm-heavy IResNet in float16 can therefore mix
+    float activations with half weights under AMP.  ArcFace is intentionally
+    kept in float32 and excluded from autocast; gradients still flow through
+    the input image while its frozen weights receive no gradients.
+    """
 
     def __init__(self, model: nn.Module, input_size: int = 112) -> None:
         super().__init__()
-        self.model = model
+        self.model = model.float()
         self.input_size = int(input_size)
 
     def forward(self, images_01: torch.Tensor) -> torch.Tensor:
-        faces = F.interpolate(
-            images_01,
-            size=(self.input_size, self.input_size),
-            mode="bilinear",
-            align_corners=False,
-        )
-        return self.model(faces.to(dtype=_module_dtype(self.model)))
+        with torch.autocast(device_type=images_01.device.type, enabled=False):
+            faces = F.interpolate(
+                images_01.float(),
+                size=(self.input_size, self.input_size),
+                mode="bilinear",
+                align_corners=False,
+            )
+            return self.model(faces)
 
 
 class MiVOLOFaceOnlyAgeModel(nn.Module):
@@ -166,13 +174,15 @@ def load_pretrained_auxiliary_models(
     resolved_dtype = dtype or (torch.float16 if resolved_device.type == "cuda" else torch.float32)
     if resolved_device.type == "cpu" and resolved_dtype == torch.float16:
         resolved_dtype = torch.float32
+    # ArcFace remains FP32 even when the diffusion backbone and MiVOLO use
+    # FP16/BF16. See ArcFaceR50InputAdapter for the py-feat dtype constraint.
     arcface = _load_arcface(
         identity_model_id,
         revision=identity_revision,
         token=token,
         cache_dir=cache_dir,
         local_files_only=local_files_only,
-    ).to(device=resolved_device, dtype=resolved_dtype)
+    ).to(device=resolved_device, dtype=torch.float32)
     mivolo = _load_mivolo(
         age_model_id,
         dtype=resolved_dtype,
@@ -201,6 +211,8 @@ def load_pretrained_auxiliary_models(
         "age_model_id": age_model_id,
         "device": resolved_device,
         "dtype": resolved_dtype,
+        "identity_dtype": torch.float32,
+        "age_dtype": resolved_dtype,
         "activation_checkpointing": bool(activation_checkpointing),
         "mivolo_body_input": "normalized_black_missing_crop",
     }

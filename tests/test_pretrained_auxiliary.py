@@ -45,7 +45,7 @@ class RecordingMiVOLO(nn.Module):
 
 
 def test_arcface_bridge_resizes_preserves_gradient_and_freezes_weights():
-    raw = RecordingArcFace()
+    raw = RecordingArcFace().half()
     adapter = IdentityEncoderAdapter(
         ArcFaceR50InputAdapter(raw), activation_checkpointing=True
     )
@@ -53,9 +53,23 @@ def test_arcface_bridge_resizes_preserves_gradient_and_freezes_weights():
     embeddings = adapter(images)
     embeddings.sum().backward()
     assert raw.last_input.shape == (2, 3, 112, 112)
+    assert raw.last_input.dtype == torch.float32
+    assert next(raw.parameters()).dtype == torch.float32
     assert float(raw.last_input.min()) >= 0 and float(raw.last_input.max()) <= 1
     assert images.grad is not None and images.grad.abs().sum() > 0
     assert all(not parameter.requires_grad and parameter.grad is None for parameter in adapter.parameters())
+
+
+def test_arcface_bridge_is_fp32_inside_an_outer_cpu_autocast():
+    raw = RecordingArcFace().to(dtype=torch.bfloat16)
+    adapter = IdentityEncoderAdapter(ArcFaceR50InputAdapter(raw))
+    images = torch.rand(2, 3, 16, 16, requires_grad=True)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        embeddings = adapter(images)
+    embeddings.sum().backward()
+    assert raw.last_input.dtype == torch.float32
+    assert next(raw.parameters()).dtype == torch.float32
+    assert images.grad is not None and images.grad.abs().sum() > 0
 
 
 def test_mivolo_bridge_uses_384_face_and_official_missing_body_value():

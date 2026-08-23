@@ -403,7 +403,9 @@ def build_face_aging_diffusion_bundle(
         if verbose:
             print(
                 "Auxiliary models:", identity_model_id, "+", age_model_id,
-                f"| device={auxiliary['device']} dtype={auxiliary['dtype']}",
+                f"| device={auxiliary['device']}",
+                f"ArcFace dtype={auxiliary['identity_dtype']}",
+                f"MiVOLO dtype={auxiliary['age_dtype']}",
                 f"| activation checkpointing={auxiliary['activation_checkpointing']}",
             )
     return bundle
