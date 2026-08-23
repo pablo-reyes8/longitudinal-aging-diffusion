@@ -1,0 +1,17 @@
+mode: inverse
+use_inverse_diffusion: true
+num_inference_steps: 50
+strength: 0.45
+inversion_strength: 1.0
+text_guidance_scale: 7.0
+image_guidance_scale: 1.5
+negative_prompt: ""
+prompt_style: selfage
+use_cfg: true
+seed: 42
+image_size: 256
+output_type: pil
+return_dict: true
+return_latents: false
+return_intermediates: false
+compute_diagnostics: false

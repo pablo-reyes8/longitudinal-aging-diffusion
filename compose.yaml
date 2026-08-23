@@ -1,0 +1,21 @@
+services:
+  face-aging:
+    build: .
+    image: longitudinal-face-aging:latest
+    ipc: host
+    environment:
+      HF_HOME: /workspace/.cache/huggingface
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ${DATASET_DIR:-./data}:/workspace/data:ro
+      - ${CHECKPOINT_DIR:-./checkpoints}:/workspace/checkpoints
+      - ${OUTPUT_DIR:-./outputs}:/workspace/outputs
+      - ${HF_CACHE_DIR:-./.cache/huggingface}:/workspace/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: ["python", "-m", "scripts.train", "--help"]

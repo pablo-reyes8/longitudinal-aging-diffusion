@@ -1,0 +1,15 @@
+# Experimental DoRA alternative. LoRA remains the recommended baseline.
+model_id: stable-diffusion-v1-5/stable-diffusion-v1-5
+vae_id: null
+adapter_type: dora
+rank: 16
+alpha: 16.0
+dropout: 0.0
+target_modules: [to_q, to_k, to_v, to_out.0]
+source_conditioning: concat
+device: auto
+dtype: auto
+local_files_only: false
+revision: null
+variant: null
+verbose: true

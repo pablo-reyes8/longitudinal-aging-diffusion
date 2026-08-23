@@ -1,6 +1,57 @@
-# Supervised Longitudinal Face Aging
+# Longitudinal Face Aging
 
-PyTorch data pipeline for supervised forward face aging with real longitudinal images. Each identity has its own directory and image filenames begin with the observed age:
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-EE4C2C?logo=pytorch&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-green)
+![Tests](https://img.shields.io/badge/tests-175%20passed-brightgreen)
+
+Supervised photo aging from real longitudinal observations. The project adapts
+Stable Diffusion 1.5 with source-image conditioning and lightweight LoRA/DoRA
+attention adapters, while keeping the VAE and CLIP text encoder frozen.
+
+> Status: research pipeline. Data loading, model adaptation, numerical loss,
+> mixed-precision training, checkpointing, direct inference, and deterministic
+> DDIM inversion are implemented and covered by offline tests. Model weights
+> and private face data are never included.
+
+## Why longitudinal supervision?
+
+Every training pair contains the same person at two different observed ages.
+This gives the model a direct aging target while identity-disjoint splits prevent
+the same person from appearing in training and evaluation.
+
+```text
+source photograph + target-age prompt
+                 │
+          VAE / CLIP encoding
+                 │
+  source latent + noisy target latent
+                 │
+       SD1.5 U-Net + LoRA/DoRA
+                 │
+  diffusion + identity + age objectives
+                 │
+       direct or DDIM-inverse edit
+```
+
+## Repository layout
+
+```text
+config/               YAML presets for data, models, training, and inference
+data/                 Longitudinal indexing, pairing, datasets, and loaders
+notebooks/            Guided server workflows
+scripts/              Data, training, and inference CLI entry points
+src/model/            SD1.5 loading, 8-channel conditioning, LoRA and DoRA
+src/loss/             Composite supervised diffusion objective
+src/training/         Mixed-precision loop, validation, monitoring, checkpoints
+src/inference/        Direct editing, three-way CFG, and DDIM inversion
+tests/                Strict numerical, structural, and integration tests
+```
+
+## Dataset convention
+
+Each identity has a directory. The numeric filename prefix is the observed age;
+suffixes distinguish multiple photographs at the same age.
 
 ```text
 dataset_root/
@@ -11,98 +62,172 @@ dataset_root/
     └── 52.png
 ```
 
-The pipeline creates identity-disjoint train/validation/test splits and only pairs images from the same person when `target_age > source_age`. It returns normalized source/target tensors, exact ages, age difference, prompts, paths, and identity metadata. Suspicious labels such as `501.jpg` are audited and normalized to age `51`.
+Only forward pairs from the same identity are generated (`target_age >
+source_age`). Labels such as `501.jpg` are audited and normalized to age `51`.
+The `data/sample` directory is intentionally ignored by Git.
 
-## Quick start
+## Installation
 
-Use the existing Conda environment:
+Activate the existing environment and install the project in editable mode:
 
 ```bash
 conda activate deep_learning
+python -m pip install -e ".[dev,notebooks]"
 ```
+
+On a GPU server, install the PyTorch build matching its CUDA version first.
+`xformers` is optional and must match both PyTorch and CUDA:
+
+```bash
+python -m pip install -e ".[xformers]"
+```
+
+The project lazily imports Diffusers and Transformers, so all offline structural
+tests can run without downloading SD1.5. The maintained backbone identifier is
+[`stable-diffusion-v1-5/stable-diffusion-v1-5`](https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5).
+
+## Command-line workflows
+
+All commands read versioned YAML presets from [`config`](config). Values that
+identify private resources—dataset paths, checkpoints, and source images—are
+provided at runtime.
+
+### 1. Prepare and validate data
+
+```bash
+aging-data \
+  --dataset-root /server/data/longitudinal_faces \
+  --config config/data/default.yaml \
+  --output-dir artifacts/data
+```
+
+This writes `manifest.csv`, `splits.csv`, and `validation_report.json`. It checks
+age parsing, corrupt images, identity/path leakage, forward pairs, and split
+coverage. Without editable installation, use:
+
+```bash
+python scripts/prepare_data.py --dataset-root /server/data/longitudinal_faces
+```
+
+### 2. Train
+
+```bash
+aging-train \
+  --dataset-root /server/data/longitudinal_faces \
+  --data-config config/data/default.yaml \
+  --model-config config/models/sd15_lora.yaml \
+  --training-config config/training/photo_editing.yaml \
+  --checkpoint-dir /server/checkpoints/face_aging \
+  --monitoring-image /server/monitor/fixed_face.jpg
+```
+
+The baseline uses conservative photo-editing hyperparameters: LoRA `5e-5`,
+expanded input convolution `1e-5`, Min-SNR 5, 5% conditioning dropout, fixed
+monitoring seed, and DDIM-inverse monitoring. The CLI preset uses diffusion loss
+only so it works without undocumented auxiliary checkpoints. To enable identity
+and age objectives, attach the real frozen networks as shown in
+[`notebooks/training.ipynb`](notebooks/training.ipynb).
+
+Resume exactly from a training checkpoint with:
+
+```bash
+aging-train \
+  --dataset-root /server/data/longitudinal_faces \
+  --resume-from /server/checkpoints/face_aging/latest/training_resume.pt
+```
+
+### 3. Infer
+
+```bash
+aging-infer \
+  --checkpoint /server/checkpoints/face_aging/best/adapter_inference.pt \
+  --image /server/input/person.jpg \
+  --target-age 65 \
+  --mode inverse \
+  --output /server/outputs/person_age_65.png
+```
+
+An explicit prompt can replace `--target-age`:
+
+```bash
+aging-infer \
+  --checkpoint checkpoint.pt \
+  --image person.jpg \
+  --target-prompt "photo of a person as 70-year-old" \
+  --mode direct \
+  --output aged.png
+```
+
+Inference accepts both lightweight adapter checkpoints and full training-resume
+checkpoints; optimizer, loader, and GradScaler state are not needed.
+
+## Python and notebooks
+
+The same public APIs used by the CLI remain available for experiments:
 
 ```python
-from data import build_face_aging_dataloaders, inspect_batch
+from data import build_face_aging_dataloaders
+from src.inference import infer_face_aging
 
 loaders, metadata = build_face_aging_dataloaders(
-    root_dir="/path/to/dataset_root",
-    image_size=256,
-    batch_size=4,
-    num_workers=0,
-    train_drop_last=False,
+    "/path/to/dataset_root", image_size=256, batch_size=4
 )
 
-batch = next(iter(loaders["train"]))
-inspect_batch(batch)
+result = infer_face_aging(
+    bundle=bundle,
+    image="person.jpg",
+    target_age=65,
+    use_inverse_diffusion=True,
+    seed=42,
+)
 ```
 
-For a ready-to-run Jupyter example, open `notebooks/data_loader.ipynb` and change only `DATASET_ROOT`.
+- [`notebooks/data_loader.ipynb`](notebooks/data_loader.ipynb): build and inspect loaders.
+- [`notebooks/model.ipynb`](notebooks/model.ipynb): load SD1.5 and verify trainable parameters.
+- [`notebooks/training.ipynb`](notebooks/training.ipynb): full server training workflow.
+- [`notebooks/inference.ipynb`](notebooks/inference.ipynb): checkpoint-to-image inference.
 
-## Validation
+## Docker
+
+The image uses a CUDA-enabled PyTorch runtime. Datasets, checkpoints, outputs,
+and the Hugging Face cache are mounted rather than copied into the image.
+
+```bash
+cp .env.example .env
+docker compose build
+docker compose run --rm face-aging python -m scripts.train --help
+```
+
+Set host paths and `HF_TOKEN` in `.env`. NVIDIA Container Toolkit is required
+for GPU access. To launch a real command, override the Compose help command and
+use container paths such as `/workspace/data` and `/workspace/checkpoints`.
+
+## Tests and validation
 
 ```bash
 pytest -q
 python tests/run_data_pipeline_validation.py /path/to/dataset_root
-```
-
-The validation report checks identity/path leakage, forward-pair correctness against a brute-force oracle, prompt consistency, image decoding, split coverage, and pair concentration. The final diffusion training loop remains intentionally out of scope.
-
-## Model construction
-
-`src/model` builds one SD1.5-compatible bundle with a frozen VAE and CLIP text encoder, an 8-channel source-conditioned U-Net, and manual LoRA (or optional DoRA) attention adapters. The maintained default checkpoint is [`stable-diffusion-v1-5/stable-diffusion-v1-5`](https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5). Model weights are not included in this repository.
-
-On the training server, install `diffusers`, `transformers`, `accelerate`, and `safetensors` in the existing environment, then follow `notebooks/model.ipynb`. Offline model tests use small architecture-compatible doubles and never download weights.
-
-## Training loss
-
-`src/loss` provides the composite supervised aging objective: diffusion MSE for
-epsilon or velocity prediction, optional Min-SNR weighting, differentiable VAE
-reconstruction, frozen identity preservation, and frozen differentiable age
-regression. Auxiliary losses support cadence, deterministic subsampling, and a
-maximum diffusion timestep without changing the primary diffusion objective.
-
-Run the strict numerical and integration suite with:
-
-```bash
-pytest -q tests/test_loss_*.py tests/test_face_aging_loss_composite.py
+python tests/run_face_aging_model_validation.py /path/to/dataset_root
 python tests/run_face_aging_loss_validation.py /path/to/dataset_root
-```
-
-The tests use independent float64 mathematical oracles, randomized property
-checks, finite differences, gradient decomposition, failure injection, and a
-real loader-to-model-to-loss backward pass. Validation against installed real
-Diffusers classes is optional and never downloads a checkpoint.
-
-## Training
-
-`src/training` implements the single-model longitudinal training pipeline with
-direct random-timestep corruption, source/text conditioning dropout, exact
-sample-weighted gradient accumulation, BF16/FP16 autocast, safe clipping,
-warmup-cosine scheduling, deterministic validation, and atomic adapter +
-`conv_in` checkpoints with exact RNG/optimizer resume.
-
-The recommended photo-editing baseline intentionally uses conservative learning
-rates (`5e-5` LoRA, `1e-5` `conv_in`), Min-SNR 5, full timestep support, and
-5% conditioning dropout. See `notebooks/training.ipynb` for the documented
-server call to `TRAIN_AGGING_MODEL`.
-
-```bash
-pytest -q tests/test_training_*.py
-python tests/run_training_pipeline_validation.py data/sample
-```
-
-## Inference
-
-`src/inference` exposes deterministic direct img2img and DDIM-inversion editing
-through `infer_face_aging`. It supports a numeric target age or explicit prompt,
-three-way text/image classifier-free guidance, inference and training-resume
-checkpoints, direct-vs-inverse grids, age sweeps, and training-time monitoring
-of the same fixed photograph across epochs.
-
-Use `notebooks/inference.ipynb` for the complete checkpoint-to-image server
-workflow. The main switch is `use_inverse_diffusion=True`.
-
-```bash
-pytest -q tests/test_inference_*.py
+python tests/run_training_pipeline_validation.py /path/to/dataset_root
 python tests/run_inference_pipeline_validation.py
 ```
+
+The suite uses architecture-compatible doubles and independent mathematical
+oracles. Real SD1.5/GPU qualitative validation is intentionally reported as
+`NOT RUN` when weights are unavailable—it is never silently replaced by a fake
+success.
+
+## Privacy and responsible use
+
+Face images are sensitive biometric data. Use data with appropriate consent and
+legal authority, minimize retention, restrict checkpoint access, and document
+demographic coverage and known limitations. Generated ages are synthetic visual
+edits, not medical predictions or verified future appearances.
+
+## Contributing and license
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development and scientific-testing
+requirements, [`SECURITY.md`](SECURITY.md) for responsible disclosure, and
+[`CHANGELOG.md`](CHANGELOG.md) for notable changes. This project is released
+under the [`MIT License`](LICENSE).

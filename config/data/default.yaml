@@ -1,0 +1,22 @@
+# dataset_root is intentionally supplied by CLI so the same file works locally and on a server.
+image_size: 256
+batch_size: 4
+num_workers: 4
+split_ratios: [0.8, 0.1, 0.1]
+seed: 42
+train_pair_strategy: random_target
+eval_pair_strategy: all
+min_age_gap: 1
+max_age_gap: null
+prompt_style: selfage
+dynamic_person_word: false
+horizontal_flip_prob: 0.2
+normalize_over_100: true
+pin_memory: true
+persistent_workers: true
+prefetch_factor: 2
+train_shuffle: true
+train_drop_last: false
+eval_drop_last: false
+use_cached_manifest: true
+use_cached_splits: true

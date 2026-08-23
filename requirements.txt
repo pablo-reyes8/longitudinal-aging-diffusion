@@ -1,0 +1,2 @@
+# Install a CUDA-matched PyTorch build first when using a GPU server.
+-e .
