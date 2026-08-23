@@ -16,4 +16,16 @@ dtype: auto
 local_files_only: false
 revision: null
 variant: null
+
+# Frozen differentiable training auxiliaries. MiVOLO executes repository-defined
+# Transformers code, so pin age_revision for long-lived production experiments.
+load_auxiliary_models: true
+identity_model_id: py-feat/arcface_r50
+age_model_id: iitolstykh/mivolo_v2
+auxiliary_dtype: null
+identity_revision: null
+age_revision: null
+auxiliary_cache_dir: null
+auxiliary_trust_remote_code: true
+auxiliary_activation_checkpointing: true
 verbose: true

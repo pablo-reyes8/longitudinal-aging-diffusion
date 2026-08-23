@@ -31,6 +31,7 @@ def test_all_default_yaml_configs_are_mappings_and_model_dtype_is_resolved():
         assert load_yaml(path)
     model = model_builder_kwargs(load_yaml("config/models/sd15_lora.yaml"))
     assert model["dtype"] is None and model["device"] is None
+    assert model["auxiliary_dtype"] is None
     assert resolve_dtype("bf16") is torch.bfloat16
     assert resolve_dtype("fp16") is torch.float16
 

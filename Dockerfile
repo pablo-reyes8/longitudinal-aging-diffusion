@@ -15,7 +15,7 @@ COPY scripts ./scripts
 COPY config ./config
 
 RUN python -m pip install --upgrade pip && \
-    python -m pip install -e ".[notebooks]"
+    python -m pip install -e ".[notebooks,auxiliary]"
 
 VOLUME ["/workspace/data", "/workspace/checkpoints", "/workspace/outputs", "/workspace/.cache"]
 

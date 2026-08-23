@@ -16,6 +16,7 @@ from .seed import capture_rng_state, restore_rng_state
 PROTECTED_BUNDLE_KEYS = (
     "model_id", "adapter_type", "rank", "target_modules",
     "source_conditioning", "unet_in_channels", "unet_cross_attention_dim",
+    "identity_model_id", "age_model_id",
 )
 PROTECTED_TRAINING_KEYS = (
     "max_train_steps", "total_planned_optimizer_steps", "grad_accum_steps",

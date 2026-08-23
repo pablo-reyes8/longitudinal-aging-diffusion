@@ -9,7 +9,7 @@ Use Python 3.10 or newer. The project was developed with the existing
 
 ```bash
 conda activate deep_learning
-python -m pip install -e ".[dev,notebooks]"
+python -m pip install -e ".[auxiliary,dev,notebooks]"
 pytest -q
 ```
 

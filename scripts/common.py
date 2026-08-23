@@ -56,6 +56,9 @@ def resolve_dtype(value: str | None) -> torch.dtype | None:
 def model_builder_kwargs(config: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(config)
     result["dtype"] = resolve_dtype(result.pop("dtype", "auto"))
+    auxiliary_dtype = result.get("auxiliary_dtype")
+    if isinstance(auxiliary_dtype, str):
+        result["auxiliary_dtype"] = resolve_dtype(auxiliary_dtype)
     if result.get("device") == "auto":
         result["device"] = None
     return result

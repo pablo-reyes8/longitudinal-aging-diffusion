@@ -342,9 +342,18 @@ def build_face_aging_diffusion_bundle(
     variant: str | None = None,
     token: str | bool | None = None,
     local_files_only: bool = False,
+    load_auxiliary_models: bool = False,
+    identity_model_id: str = "py-feat/arcface_r50",
+    age_model_id: str = "iitolstykh/mivolo_v2",
+    auxiliary_dtype: torch.dtype | None = None,
+    identity_revision: str | None = None,
+    age_revision: str | None = None,
+    auxiliary_cache_dir: str | None = None,
+    auxiliary_trust_remote_code: bool = False,
+    auxiliary_activation_checkpointing: bool = True,
     verbose: bool = True,
 ) -> dict[str, Any]:
-    """Load and adapt exactly one SD1.x-compatible backbone."""
+    """Load one SD1.x backbone and optionally its frozen auxiliary losses."""
     components = load_diffusion_components(
         model_id,
         vae_id=vae_id,
@@ -356,7 +365,7 @@ def build_face_aging_diffusion_bundle(
         token=token,
         local_files_only=local_files_only,
     )
-    return assemble_face_aging_diffusion_bundle(
+    bundle = assemble_face_aging_diffusion_bundle(
         components,
         model_id=model_id,
         vae_id=vae_id,
@@ -369,6 +378,35 @@ def build_face_aging_diffusion_bundle(
         trainable_dtype=trainable_dtype,
         verbose=verbose,
     )
+    if load_auxiliary_models:
+        from src.loss import load_pretrained_auxiliary_models
+
+        auxiliary = load_pretrained_auxiliary_models(
+            identity_model_id=identity_model_id,
+            age_model_id=age_model_id,
+            device=bundle["device"],
+            dtype=auxiliary_dtype,
+            identity_revision=identity_revision,
+            age_revision=age_revision,
+            token=token,
+            cache_dir=auxiliary_cache_dir,
+            local_files_only=local_files_only,
+            trust_remote_code=auxiliary_trust_remote_code,
+            activation_checkpointing=auxiliary_activation_checkpointing,
+        )
+        bundle.update(auxiliary)
+        bundle["config"].update({
+            "identity_model_id": identity_model_id,
+            "age_model_id": age_model_id,
+            "auxiliary_activation_checkpointing": bool(auxiliary_activation_checkpointing),
+        })
+        if verbose:
+            print(
+                "Auxiliary models:", identity_model_id, "+", age_model_id,
+                f"| device={auxiliary['device']} dtype={auxiliary['dtype']}",
+                f"| activation checkpointing={auxiliary['activation_checkpointing']}",
+            )
+    return bundle
 
 
 def print_parameter_report(bundle: Mapping[str, Any], max_names: int = 30) -> None:

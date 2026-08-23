@@ -11,10 +11,10 @@ help:
 	@echo "docker-build         Build the CUDA runtime image"
 
 install:
-	$(PYTHON) -m pip install -e .
+	$(PYTHON) -m pip install -e ".[auxiliary]"
 
 install-dev:
-	$(PYTHON) -m pip install -e ".[dev,notebooks]"
+	$(PYTHON) -m pip install -e ".[auxiliary,dev,notebooks]"
 
 test:
 	$(PYTHON) -m pytest -q

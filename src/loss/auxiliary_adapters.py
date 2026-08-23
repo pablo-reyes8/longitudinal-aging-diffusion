@@ -7,6 +7,7 @@ from typing import Callable, Sequence
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 
 TensorTransform = Callable[[torch.Tensor], torch.Tensor]
@@ -30,11 +31,13 @@ class _FrozenAdapter(nn.Module):
         model: nn.Module,
         preprocess: TensorTransform | None = None,
         output_transform: Callable | None = None,
+        activation_checkpointing: bool = False,
     ) -> None:
         super().__init__()
         self.model = model
         self.preprocess = preprocess or _identity
         self.output_transform = output_transform or _identity
+        self.activation_checkpointing = bool(activation_checkpointing)
         self.model.requires_grad_(False)
         self.model.eval()
 
@@ -44,7 +47,12 @@ class _FrozenAdapter(nn.Module):
         return self
 
     def _run(self, images: torch.Tensor) -> torch.Tensor:
-        return _as_tensor_output(self.output_transform(self.model(self.preprocess(images))), type(self).__name__)
+        processed = self.preprocess(images)
+        if self.activation_checkpointing and torch.is_grad_enabled() and processed.requires_grad:
+            output = checkpoint(self.model, processed, use_reentrant=False)
+        else:
+            output = self.model(processed)
+        return _as_tensor_output(self.output_transform(output), type(self).__name__)
 
 
 class IdentityEncoderAdapter(_FrozenAdapter):
@@ -88,10 +96,11 @@ class AgeEstimatorAdapter(_FrozenAdapter):
         age_values: torch.Tensor | Sequence[float] | None = None,
         preprocess: TensorTransform | None = None,
         output_transform: Callable | None = None,
+        activation_checkpointing: bool = False,
     ) -> None:
         if output_type not in {"scalar", "logits"}:
             raise ValueError("output_type must be 'scalar' or 'logits'")
-        super().__init__(model, preprocess, output_transform)
+        super().__init__(model, preprocess, output_transform, activation_checkpointing)
         self.output_type = output_type
         if age_values is not None:
             self.register_buffer("age_values", torch.as_tensor(age_values, dtype=torch.float32), persistent=True)

@@ -8,6 +8,7 @@ from typing import Any, Mapping, Sequence
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from .auxiliary_adapters import AgeEstimatorAdapter, IdentityEncoderAdapter, identity_cosine_loss
 from .diffusion_utils import (
@@ -59,6 +60,7 @@ class FaceAgingDiffusionLoss(nn.Module):
         auxiliary_seed: int = 42,
         clamp_pred_x0: bool = True,
         check_finite: bool = True,
+        vae_decode_checkpointing: bool = False,
     ) -> None:
         super().__init__()
         if diffusion_weight <= 0 or identity_weight < 0 or age_weight < 0:
@@ -100,6 +102,7 @@ class FaceAgingDiffusionLoss(nn.Module):
         # This controls decoded-image conversion clipping only. Latents are never clamped.
         self.clamp_pred_x0 = bool(clamp_pred_x0)
         self.check_finite = bool(check_finite)
+        self.vae_decode_checkpointing = bool(vae_decode_checkpointing)
         self.vae.requires_grad_(False)
         self.vae.eval()
         if self.identity_encoder is not None:
@@ -131,6 +134,7 @@ class FaceAgingDiffusionLoss(nn.Module):
             "auxiliary_seed": self.auxiliary_seed,
             "clamp_pred_x0": self.clamp_pred_x0,
             "check_finite": self.check_finite,
+            "vae_decode_checkpointing": self.vae_decode_checkpointing,
         }
 
     @classmethod
@@ -281,7 +285,15 @@ class FaceAgingDiffusionLoss(nn.Module):
             if vae_device != model_pred.device:
                 raise ValueError("VAE and model_pred must be on the same device; loss does not move large tensors implicitly")
             scaling_factor = float(getattr(self.vae.config, "scaling_factor"))
-            decoded = self.vae.decode(pred_x0_latents.to(next(self.vae.parameters()).dtype) / scaling_factor).sample
+            vae_input = pred_x0_latents.to(next(self.vae.parameters()).dtype) / scaling_factor
+            if self.vae_decode_checkpointing and torch.is_grad_enabled() and vae_input.requires_grad:
+                decoded = checkpoint(
+                    lambda value: self.vae.decode(value).sample,
+                    vae_input,
+                    use_reentrant=False,
+                )
+            else:
+                decoded = self.vae.decode(vae_input).sample
             pred_x0_images = sd_image_to_01(decoded, clamp=self.clamp_pred_x0)
             self._check_finite(pred_x0_latents=pred_x0_latents, pred_x0_images=pred_x0_images)
 

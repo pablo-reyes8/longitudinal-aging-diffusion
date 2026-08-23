@@ -47,13 +47,18 @@ def run(args: argparse.Namespace):
     loaders, metadata = build_face_aging_dataloaders(args.dataset_root, **data_config)
     bundle = build_face_aging_diffusion_bundle(**model_builder_kwargs(model_config))
     loss_config = dict(training_config.pop("loss", {}))
-    if loss_config.get("identity_weight", 0) or loss_config.get("age_weight", 0):
-        raise ValueError(
-            "The generic CLI has no auxiliary checkpoint factories. Keep identity_weight and "
-            "age_weight at zero, or construct their adapters through notebooks/training.ipynb."
-        )
+    identity_encoder = bundle.get("identity_encoder")
+    age_estimator = bundle.get("age_estimator")
+    if loss_config.get("identity_weight", 0) and identity_encoder is None:
+        raise ValueError("identity_weight > 0 requires load_auxiliary_models=true in the model YAML")
+    if loss_config.get("age_weight", 0) and age_estimator is None:
+        raise ValueError("age_weight > 0 requires load_auxiliary_models=true in the model YAML")
     loss_fn = FaceAgingDiffusionLoss(
-        scheduler=bundle["scheduler_train"], vae=bundle["vae"], **loss_config
+        scheduler=bundle["scheduler_train"],
+        vae=bundle["vae"],
+        identity_encoder=identity_encoder,
+        age_estimator=age_estimator,
+        **loss_config,
     )
     training_config.setdefault("image_size", data_config.get("image_size"))
     training_config.setdefault("prompt_configuration", {

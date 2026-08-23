@@ -33,6 +33,12 @@ dependencies = [
 
 [project.optional-dependencies]
 notebooks = ["jupyterlab>=4,<5", "ipykernel>=6,<7", "matplotlib>=3.8,<4"]
+auxiliary = [
+  "py-feat>=2.1.1; python_version >= '3.11'",
+  "mivolo @ git+https://github.com/WildChlamydia/MiVOLO.git@main",
+  "transformers>=4.51,<5",
+  "accelerate>=1.8.1,<2",
+]
 dev = [
   "pytest>=8,<9",
   "pytest-cov>=5,<7",

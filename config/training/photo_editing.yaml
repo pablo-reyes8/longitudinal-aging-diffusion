@@ -21,6 +21,7 @@ sample_source_posterior: false
 sample_target_posterior: true
 noise_offset: 0.0
 min_snr_gamma: 5.0
+auxiliary_max_timestep: 400
 checkpoint_dir: checkpoints/face_aging
 save_every_epochs: 1
 save_epoch_checkpoints: true
@@ -41,20 +42,20 @@ seed: 42
 deterministic: false
 device: auto
 
-# The CLI baseline is immediately runnable without external auxiliary networks.
-# Set these above zero from Python after supplying IdentityEncoderAdapter and
-# AgeEstimatorAdapter instances, as demonstrated in notebooks/training.ipynb.
+# Frozen ArcFace and MiVOLO losses run every fourth training microbatch on 25% of
+# eligible samples. This bounds activation memory while retaining regularization.
 loss:
   diffusion_weight: 1.0
-  identity_weight: 0.0
-  age_weight: 0.0
+  identity_weight: 0.1
+  age_weight: 0.1
   identity_reference: target
   diffusion_loss_type: mse
   age_loss_type: l1
   min_snr_gamma: 5.0
-  auxiliary_every_n_steps: 1
-  auxiliary_sample_fraction: 1.0
-  auxiliary_max_timestep: null
+  auxiliary_every_n_steps: 4
+  auxiliary_sample_fraction: 0.25
+  auxiliary_max_timestep: 400
   auxiliary_seed: 42
   clamp_pred_x0: true
   check_finite: true
+  vae_decode_checkpointing: true

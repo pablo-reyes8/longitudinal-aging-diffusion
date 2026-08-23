@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-EE4C2C?logo=pytorch&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Tests](https://img.shields.io/badge/tests-175%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-182%20passed-brightgreen)
 
 Supervised photo aging from real longitudinal observations. The project adapts
 Stable Diffusion 1.5 with source-image conditioning and lightweight LoRA/DoRA
@@ -72,8 +72,11 @@ Activate the existing environment and install the project in editable mode:
 
 ```bash
 conda activate deep_learning
-python -m pip install -e ".[dev,notebooks]"
+python -m pip install -e ".[auxiliary,dev,notebooks]"
 ```
+
+The ArcFace auxiliary extra requires Python 3.11 or newer. Core data, model,
+loss, training, and inference modules remain compatible with Python 3.10.
 
 On a GPU server, install the PyTorch build matching its CUDA version first.
 `xformers` is optional and must match both PyTorch and CUDA:
@@ -123,10 +126,13 @@ aging-train \
 
 The baseline uses conservative photo-editing hyperparameters: LoRA `5e-5`,
 expanded input convolution `1e-5`, Min-SNR 5, 5% conditioning dropout, fixed
-monitoring seed, and DDIM-inverse monitoring. The CLI preset uses diffusion loss
-only so it works without undocumented auxiliary checkpoints. To enable identity
-and age objectives, attach the real frozen networks as shown in
-[`notebooks/training.ipynb`](notebooks/training.ipynb).
+monitoring seed, and DDIM-inverse monitoring. It loads frozen
+`py-feat/arcface_r50` and `iitolstykh/mivolo_v2` auxiliaries. To control VRAM,
+their losses run every fourth training microbatch on 25% of eligible samples and use
+activation checkpointing through the VAE and auxiliary networks. See
+[`notebooks/training.ipynb`](notebooks/training.ipynb) for the complete setup.
+Training images should already be face-centered or aligned: a non-differentiable
+face detector is intentionally not inserted into the loss graph.
 
 Resume exactly from a training checkpoint with:
 
@@ -224,6 +230,12 @@ Face images are sensitive biometric data. Use data with appropriate consent and
 legal authority, minimize retention, restrict checkpoint access, and document
 demographic coverage and known limitations. Generated ages are synthetic visual
 edits, not medical predictions or verified future appearances.
+
+The pretrained `py-feat/arcface_r50` weights inherit InsightFace's
+non-commercial-research restriction; the repository's MIT license does not
+override that model license. MiVOLO V2 is loaded with Hugging Face
+`trust_remote_code=True`; review and pin its repository revision for controlled
+or long-lived training runs.
 
 ## Contributing and license
 

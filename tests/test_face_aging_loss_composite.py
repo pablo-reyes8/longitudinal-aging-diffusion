@@ -275,6 +275,25 @@ def test_config_roundtrip_preserves_all_scientific_hyperparameters():
     assert rebuilt.get_config() == config
 
 
+def test_checkpointed_vae_decode_matches_regular_loss_and_gradient():
+    regular = make_loss(auxiliary_sample_fraction=1, vae_decode_checkpointing=False)
+    checkpointed = copy.deepcopy(regular)
+    checkpointed.vae_decode_checkpointing = True
+    regular_inputs = make_inputs(regular, batch=3)
+    checkpointed_inputs = {
+        key: (value.detach().clone().requires_grad_(value.requires_grad) if torch.is_tensor(value) else value)
+        for key, value in regular_inputs.items()
+    }
+    regular_output = regular(**regular_inputs)
+    checkpointed_output = checkpointed(**checkpointed_inputs)
+    regular_gradient = torch.autograd.grad(regular_output["loss"], regular_inputs["model_pred"])[0]
+    checkpointed_gradient = torch.autograd.grad(
+        checkpointed_output["loss"], checkpointed_inputs["model_pred"]
+    )[0]
+    assert torch.allclose(regular_output["loss"], checkpointed_output["loss"], atol=1e-12)
+    assert torch.allclose(regular_gradient, checkpointed_gradient, atol=1e-12)
+
+
 @pytest.mark.parametrize(
     "override,match",
     [
