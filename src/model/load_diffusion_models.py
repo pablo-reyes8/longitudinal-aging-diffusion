@@ -393,6 +393,7 @@ def build_face_aging_optimizer(
     lr_lora: float = 1e-4,
     lr_conv_in: float = 1e-5,
     weight_decay: float = 1e-2,
+    conv_in_weight_decay: float | None = None,
     betas: tuple[float, float] = (0.9, 0.999),
     eps: float = 1e-8,
     optimizer_cls: type[torch.optim.Optimizer] = torch.optim.AdamW,
@@ -405,12 +406,13 @@ def build_face_aging_optimizer(
     all_ids = [id(parameter) for _, parameter in conv + adapters]
     if len(all_ids) != len(set(all_ids)):
         raise RuntimeError("A trainable parameter appears in more than one optimizer group")
+    conv_decay = weight_decay if conv_in_weight_decay is None else conv_in_weight_decay
     optimizer = optimizer_cls(
         [
-            {"params": [parameter for _, parameter in adapters], "lr": lr_lora, "group_name": "adapter"},
-            {"params": [parameter for _, parameter in conv], "lr": lr_conv_in, "group_name": "conv_in"},
+            {"params": [parameter for _, parameter in adapters], "lr": lr_lora, "weight_decay": weight_decay, "group_name": "adapter"},
+            {"params": [parameter for _, parameter in conv], "lr": lr_conv_in, "weight_decay": conv_decay, "group_name": "conv_in"},
         ],
-        weight_decay=weight_decay,
+        weight_decay=0.0,
         betas=betas,
         eps=eps,
     )

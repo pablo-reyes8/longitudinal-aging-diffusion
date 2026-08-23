@@ -72,3 +72,21 @@ The tests use independent float64 mathematical oracles, randomized property
 checks, finite differences, gradient decomposition, failure injection, and a
 real loader-to-model-to-loss backward pass. Validation against installed real
 Diffusers classes is optional and never downloads a checkpoint.
+
+## Training
+
+`src/training` implements the single-model longitudinal training pipeline with
+direct random-timestep corruption, source/text conditioning dropout, exact
+sample-weighted gradient accumulation, BF16/FP16 autocast, safe clipping,
+warmup-cosine scheduling, deterministic validation, and atomic adapter +
+`conv_in` checkpoints with exact RNG/optimizer resume.
+
+The recommended photo-editing baseline intentionally uses conservative learning
+rates (`5e-5` LoRA, `1e-5` `conv_in`), Min-SNR 5, full timestep support, and
+5% conditioning dropout. See `notebooks/training.ipynb` for the documented
+server call to `TRAIN_AGGING_MODEL`.
+
+```bash
+pytest -q tests/test_training_*.py
+python tests/run_training_pipeline_validation.py data/sample
+```

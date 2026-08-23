@@ -234,6 +234,7 @@ class FaceAgingDiffusionLoss(nn.Module):
         source_images: torch.Tensor | None = None,
         target_images: torch.Tensor | None = None,
         target_ages: torch.Tensor | Sequence[int | float] | None = None,
+        identity_sample_mask: torch.Tensor | None = None,
         global_step: int = 0,
         return_reconstructions: bool = False,
         return_per_sample: bool = False,
@@ -262,6 +263,13 @@ class FaceAgingDiffusionLoss(nn.Module):
         auxiliary_requested = self.identity_weight > 0 or self.age_weight > 0 or return_reconstructions
         indices = self._select_auxiliary_indices(timesteps, int(global_step)) if auxiliary_requested else torch.empty(0, dtype=torch.long, device=timesteps.device)
         auxiliary_applied = indices.numel() > 0
+        identity_indices = indices
+        if identity_sample_mask is not None:
+            if identity_sample_mask.shape != (model_pred.shape[0],) or identity_sample_mask.dtype != torch.bool:
+                raise ValueError(f"identity_sample_mask must be bool with shape [{model_pred.shape[0]}]")
+            if identity_sample_mask.device != model_pred.device:
+                raise ValueError("identity_sample_mask and model_pred must be on the same device")
+            identity_indices = indices[identity_sample_mask.index_select(0, indices)]
         if auxiliary_applied:
             selected_pred = model_pred.index_select(0, indices)
             selected_noisy = noisy_target_latents.index_select(0, indices)
@@ -280,20 +288,25 @@ class FaceAgingDiffusionLoss(nn.Module):
             batch_size = model_pred.shape[0]
             if self.identity_weight > 0:
                 target_images_checked = self._validate_image_batch("target_images", target_images, batch_size, model_pred.device)
-                pred_embeddings = self.identity_encoder(pred_x0_images)
-                reference_losses = []
-                if self.identity_reference in {"target", "both"}:
-                    target_01 = sd_image_to_01(target_images_checked.index_select(0, indices), clamp=True)
-                    target_embeddings = self.identity_encoder.encode_reference(target_01)
-                    reference_losses.append(identity_cosine_loss(pred_embeddings, target_embeddings, reduction="none"))
-                if self.identity_reference in {"source", "both"}:
-                    source_checked = self._validate_image_batch("source_images", source_images, batch_size, model_pred.device)
-                    source_01 = sd_image_to_01(source_checked.index_select(0, indices), clamp=True)
-                    source_embeddings = self.identity_encoder.encode_reference(source_01)
-                    reference_losses.append(identity_cosine_loss(pred_embeddings, source_embeddings, reduction="none"))
-                id_per_sample = torch.stack(reference_losses, dim=0).mean(dim=0)
-                loss_id = id_per_sample.mean()
-                identity_cosine_mean = float((1.0 - id_per_sample.detach()).mean())
+                if identity_indices.numel() > 0:
+                    # pred_x0_images follows `indices`; select the corresponding
+                    # local positions after conditioning-dropout filtering.
+                    local_identity_mask = identity_sample_mask.index_select(0, indices) if identity_sample_mask is not None else torch.ones_like(indices, dtype=torch.bool)
+                    identity_images = pred_x0_images[local_identity_mask]
+                    pred_embeddings = self.identity_encoder(identity_images)
+                    reference_losses = []
+                    if self.identity_reference in {"target", "both"}:
+                        target_01 = sd_image_to_01(target_images_checked.index_select(0, identity_indices), clamp=True)
+                        target_embeddings = self.identity_encoder.encode_reference(target_01)
+                        reference_losses.append(identity_cosine_loss(pred_embeddings, target_embeddings, reduction="none"))
+                    if self.identity_reference in {"source", "both"}:
+                        source_checked = self._validate_image_batch("source_images", source_images, batch_size, model_pred.device)
+                        source_01 = sd_image_to_01(source_checked.index_select(0, identity_indices), clamp=True)
+                        source_embeddings = self.identity_encoder.encode_reference(source_01)
+                        reference_losses.append(identity_cosine_loss(pred_embeddings, source_embeddings, reduction="none"))
+                    id_per_sample = torch.stack(reference_losses, dim=0).mean(dim=0)
+                    loss_id = id_per_sample.mean()
+                    identity_cosine_mean = float((1.0 - id_per_sample.detach()).mean())
             if self.age_weight > 0:
                 ages = self._normalize_target_ages(target_ages, model_pred.shape[0], model_pred.device)
                 selected_ages = ages.index_select(0, indices)
@@ -332,6 +345,8 @@ class FaceAgingDiffusionLoss(nn.Module):
             "age_to_diffusion_ratio": abs(float(weighted_age.detach())) / diff_denominator,
             "auxiliary_applied": auxiliary_applied,
             "auxiliary_count": int(indices.numel()),
+            "identity_count": int(identity_indices.numel()) if self.identity_weight > 0 else 0,
+            "age_count": int(indices.numel()) if self.age_weight > 0 else 0,
         }
         output: dict[str, Any] = {
             "loss": total_loss,
@@ -343,6 +358,7 @@ class FaceAgingDiffusionLoss(nn.Module):
             "weighted_age": weighted_age,
             "auxiliary_applied": auxiliary_applied,
             "auxiliary_indices": indices.detach(),
+            "identity_indices": identity_indices.detach(),
             "metrics": metrics,
         }
         if snr_weights is not None:
