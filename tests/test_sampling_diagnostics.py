@@ -7,6 +7,7 @@ from torch import nn
 
 from src.inference import (
     compute_face_aging_diagnostics,
+    diagnose_conditioning_sources,
     diagnose_checkpoint_age_sweep,
     infer_face_aging_direct,
 )
@@ -131,3 +132,34 @@ def test_checkpoint_diagnostic_age_error_and_generation_match_normal_inference(t
         assert list(saved.getdata()) == list(normal["image"].getdata())
     assert (output_dir / "age_sweep.png").exists()
     assert (output_dir / "sampling_diagnostics.csv").exists()
+
+
+def test_conditioning_isolation_runs_nine_matched_cases_without_writing(tmp_path, capsys):
+    bundle = attach_diagnostics(make_training_bundle(seed=883))
+    image = Image.new("RGB", (38, 32), (110, 75, 55))
+    output = diagnose_conditioning_sources(
+        bundle,
+        image,
+        source_age=26,
+        target_ages=[30, 40, 65],
+        num_inference_steps=2,
+        strength=0.35,
+        seed=2026,
+        image_size=32,
+        display_result=False,
+    )
+    frame = output["dataframe"]
+    assert len(frame) == 9
+    assert frame["condition"].tolist() == ["full"] * 3 + ["delta_only"] * 3 + ["text_only"] * 3
+    assert frame.groupby("condition")["seed"].unique().map(list).to_dict() == {
+        "delta_only": [2026], "full": [2026], "text_only": [2026],
+    }
+    assert frame.loc[frame.condition == "full", "effective_delta_age"].tolist() == [4, 14, 39]
+    assert frame.loc[frame.condition == "delta_only", "effective_delta_age"].tolist() == [4, 14, 39]
+    assert frame.loc[frame.condition == "text_only", "effective_delta_age"].tolist() == [0, 0, 0]
+    assert frame.loc[frame.condition == "delta_only", "target_prompt"].unique().tolist() == ["photo of a person"]
+    assert output["grid"].size == (90 + 3 * 32, 30 + 3 * (32 + 54))
+    assert not list(tmp_path.iterdir())
+    printed = capsys.readouterr().out
+    assert "CONDITIONING ISOLATION DIAGNOSTIC" in printed
+    assert "delta_only" in printed and "text_only" in printed

@@ -120,6 +120,23 @@ def test_source_and_prompt_conditioning_are_causally_active():
     assert not torch.equal(old["latents"], other_source["latents"])
 
 
+def test_delta_override_preserves_default_and_changes_only_effective_condition():
+    bundle = make_training_bundle(seed=118)
+    common = inference_kwargs(
+        bundle, source_age=26, target_age=65, target_prompt="photo of a person",
+        seed=2026, num_inference_steps=3,
+    )
+    normal = infer_face_aging_direct(**common)
+    explicit_default = infer_face_aging_direct(**common, override_delta_age=None)
+    text_only = infer_face_aging_direct(**common, override_delta_age=0.0)
+    assert torch.equal(normal["image_tensor"], explicit_default["image_tensor"])
+    assert normal["metadata"]["true_delta_age"] == 39
+    assert normal["metadata"]["delta_age"] == 39
+    assert text_only["metadata"]["true_delta_age"] == 39
+    assert text_only["metadata"]["delta_age"] == 0
+    assert not torch.equal(normal["image_tensor"], text_only["image_tensor"])
+
+
 def test_comparison_grid_and_age_sweep_order(tmp_path):
     bundle = make_training_bundle()
     comparison = compare_inference_modes(

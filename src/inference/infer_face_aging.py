@@ -138,6 +138,7 @@ def infer_face_aging(
     return_intermediates: bool = False,
     compute_diagnostics: bool = True,
     use_age_delta_conditioning: bool | None = None,
+    override_delta_age: float | None = None,
     identity_encoder=None,
     age_estimator=None,
     device: str | torch.device | None = None,
@@ -178,7 +179,12 @@ def infer_face_aging(
             raise ValueError(
                 "source_age and target_age are required when age-delta conditioning is enabled"
             )
-        delta_value = float(prompt_pack["target_age"] - prompt_pack["source_age"])
+        true_delta_value = float(prompt_pack["target_age"] - prompt_pack["source_age"])
+        delta_value = (
+            true_delta_value
+            if override_delta_age is None
+            else float(override_delta_age)
+        )
         edit_age_conditioning = compute_age_delta_embedding(
             bundle,
             torch.full((source_latents.shape[0],), delta_value, device=resolved_device),
@@ -190,6 +196,11 @@ def infer_face_aging(
             batch_size=source_latents.shape[0],
         )
     else:
+        true_delta_value = (
+            float(prompt_pack["target_age"] - prompt_pack["source_age"])
+            if prompt_pack["source_age"] is not None and prompt_pack["target_age"] is not None
+            else None
+        )
         delta_value = None
         edit_age_conditioning = source_age_conditioning = None
     scheduler = create_inference_scheduler(bundle)
@@ -282,6 +293,8 @@ def infer_face_aging(
             "prompt_warnings": prompt_pack["warnings"],
             "use_age_delta_conditioning": resolved_age_conditioning,
             "delta_age": delta_value,
+            "true_delta_age": true_delta_value,
+            "override_delta_age": override_delta_age,
             "start_timestep": edit.get("start_timestep", inversion.get("start_timestep") if inversion else None),
         },
     }

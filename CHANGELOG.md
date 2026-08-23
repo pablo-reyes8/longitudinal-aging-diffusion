@@ -16,3 +16,4 @@ to use semantic versioning after its first stable release.
 - YAML configuration, CLI entry points, Docker support, and project metadata.
 - Explicit age-delta MLP conditioning, relative-age supervision, and
   source/generated age-delta diagnostics.
+- In-memory conditioning-isolation diagnostic for CLIP text versus age-delta control.

@@ -10,6 +10,11 @@ from .checkpoint_diagnostics import (
     diagnose_checkpoints_age_sweep,
 )
 from .comparison_helpers import compare_inference_modes, generate_age_sweep
+from .conditioning_isolation import (
+    CONDITIONING_DIAGNOSTIC_COLUMNS,
+    diagnose_checkpoint_conditioning_sources,
+    diagnose_conditioning_sources,
+)
 from .ddim_inversion import (
     ddim_forward_step,
     ddim_invert_source_image,
