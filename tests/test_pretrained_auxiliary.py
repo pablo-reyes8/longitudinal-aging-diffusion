@@ -7,6 +7,7 @@ import torch
 from torch import nn
 
 import src.loss as loss_api
+import src.loss.pretrained_auxiliary as auxiliary_loading
 import src.model.load_diffusion_models as model_loading
 from model_fakes import make_fake_components
 from src.loss import (
@@ -73,16 +74,30 @@ def test_arcface_bridge_is_fp32_inside_an_outer_cpu_autocast():
 
 
 def test_mivolo_bridge_uses_384_face_and_official_missing_body_value():
-    raw = RecordingMiVOLO()
+    raw = RecordingMiVOLO().half()
     bridge = MiVOLOFaceOnlyAgeModel(raw)
     images = torch.rand(2, 3, 48, 32, requires_grad=True)
     ages = bridge(images)
     ages.sum().backward()
     assert ages.shape == (2, 1)
     assert raw.faces.shape == raw.bodies.shape == (2, 3, 384, 384)
+    assert raw.faces.dtype == raw.bodies.dtype == torch.float32
+    assert next(raw.parameters()).dtype == torch.float32
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
     assert torch.allclose(raw.bodies, (-mean / std).expand_as(raw.bodies))
+    assert images.grad is not None and images.grad.abs().sum() > 0
+
+
+def test_mivolo_bridge_is_fp32_inside_an_outer_cpu_autocast():
+    raw = RecordingMiVOLO().to(dtype=torch.bfloat16)
+    bridge = MiVOLOFaceOnlyAgeModel(raw)
+    images = torch.rand(2, 3, 24, 24, requires_grad=True)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        ages = bridge(images)
+    ages.sum().backward()
+    assert raw.faces.dtype == raw.bodies.dtype == torch.float32
+    assert next(raw.parameters()).dtype == torch.float32
     assert images.grad is not None and images.grad.abs().sum() > 0
 
 
@@ -117,6 +132,32 @@ def test_mivolo_remote_code_requires_explicit_opt_in():
             local_files_only=True,
             trust_remote_code=False,
         )
+
+
+def test_real_auxiliary_loader_forces_both_normalization_models_to_fp32(monkeypatch):
+    observed = {}
+
+    monkeypatch.setattr(
+        auxiliary_loading,
+        "_load_arcface",
+        lambda *args, **kwargs: RecordingArcFace().half(),
+    )
+
+    def fake_load_mivolo(*args, **kwargs):
+        observed["load_dtype"] = kwargs["dtype"]
+        return RecordingMiVOLO().half()
+
+    monkeypatch.setattr(auxiliary_loading, "_load_mivolo", fake_load_mivolo)
+    loaded = auxiliary_loading.load_pretrained_auxiliary_models(
+        device="cpu",
+        dtype=torch.bfloat16,
+        trust_remote_code=True,
+    )
+    assert observed["load_dtype"] == torch.float32
+    assert loaded["requested_dtype"] == torch.bfloat16
+    assert loaded["identity_dtype"] == loaded["age_dtype"] == torch.float32
+    assert next(loaded["identity_encoder"].parameters()).dtype == torch.float32
+    assert next(loaded["age_estimator"].parameters()).dtype == torch.float32
 
 
 def test_bundle_option_attaches_auxiliaries_without_making_them_trainable(monkeypatch):

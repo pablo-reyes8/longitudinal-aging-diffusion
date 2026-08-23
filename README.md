@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-EE4C2C?logo=pytorch&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Tests](https://img.shields.io/badge/tests-188%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-190%20passed-brightgreen)
 
 Supervised photo aging from real longitudinal observations. The project adapts
 Stable Diffusion 1.5 with source-image conditioning and lightweight LoRA/DoRA

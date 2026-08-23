@@ -17,10 +17,6 @@ DEFAULT_IDENTITY_MODEL_ID = IDENTITY_MODEL_ID
 DEFAULT_AGE_MODEL_ID = AGE_MODEL_ID
 
 
-def _module_dtype(module: nn.Module) -> torch.dtype:
-    return next(module.parameters()).dtype
-
-
 class ArcFaceR50InputAdapter(nn.Module):
     """Resize differentiably and call py-feat's ArcFace `[0,1]` wrapper.
 
@@ -64,26 +60,29 @@ class MiVOLOFaceOnlyAgeModel(nn.Module):
         std=(0.229, 0.224, 0.225),
     ) -> None:
         super().__init__()
-        self.model = model
+        # The maintained MiVOLO implementation contains normalization paths
+        # that promote activations to float32. Half-precision weights then fail
+        # in its BatchNorm layers, so the frozen estimator is kept in FP32.
+        self.model = model.float()
         self.input_size = int(input_size)
         self.register_buffer("mean", torch.tensor(mean).view(1, 3, 1, 1), persistent=False)
         self.register_buffer("std", torch.tensor(std).view(1, 3, 1, 1), persistent=False)
 
     def forward(self, images_01: torch.Tensor) -> torch.Tensor:
-        resized = F.interpolate(
-            images_01,
-            size=(self.input_size, self.input_size),
-            mode="bilinear",
-            align_corners=False,
-        )
-        face_input = (resized - self.mean.to(resized)) / self.std.to(resized)
-        body_input = (torch.zeros_like(resized) - self.mean.to(resized)) / self.std.to(resized)
-        model_dtype = _module_dtype(self.model)
-        output = self.model(
-            faces_input=face_input.to(dtype=model_dtype),
-            body_input=body_input.to(dtype=model_dtype),
-            return_dict=True,
-        )
+        with torch.autocast(device_type=images_01.device.type, enabled=False):
+            resized = F.interpolate(
+                images_01.float(),
+                size=(self.input_size, self.input_size),
+                mode="bilinear",
+                align_corners=False,
+            )
+            face_input = (resized - self.mean.to(resized)) / self.std.to(resized)
+            body_input = (torch.zeros_like(resized) - self.mean.to(resized)) / self.std.to(resized)
+            output = self.model(
+                faces_input=face_input,
+                body_input=body_input,
+                return_dict=True,
+            )
         age = getattr(output, "age_output", None)
         if age is None:
             raise TypeError("MiVOLO output does not expose age_output")
@@ -185,13 +184,13 @@ def load_pretrained_auxiliary_models(
     ).to(device=resolved_device, dtype=torch.float32)
     mivolo = _load_mivolo(
         age_model_id,
-        dtype=resolved_dtype,
+        dtype=torch.float32,
         revision=age_revision,
         token=token,
         cache_dir=cache_dir,
         local_files_only=local_files_only,
         trust_remote_code=trust_remote_code,
-    ).to(resolved_device)
+    ).to(device=resolved_device, dtype=torch.float32)
     identity_encoder = IdentityEncoderAdapter(
         ArcFaceR50InputAdapter(arcface),
         activation_checkpointing=activation_checkpointing,
@@ -210,9 +209,10 @@ def load_pretrained_auxiliary_models(
         "identity_model_id": identity_model_id,
         "age_model_id": age_model_id,
         "device": resolved_device,
-        "dtype": resolved_dtype,
+        "dtype": torch.float32,
+        "requested_dtype": resolved_dtype,
         "identity_dtype": torch.float32,
-        "age_dtype": resolved_dtype,
+        "age_dtype": torch.float32,
         "activation_checkpointing": bool(activation_checkpointing),
         "mivolo_body_input": "normalized_black_missing_crop",
     }
