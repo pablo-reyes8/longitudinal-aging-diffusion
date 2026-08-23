@@ -45,4 +45,10 @@ pytest -q
 python tests/run_data_pipeline_validation.py /path/to/dataset_root
 ```
 
-The validation report checks identity/path leakage, forward-pair correctness against a brute-force oracle, prompt consistency, image decoding, split coverage, and pair concentration. This repository currently implements only the data layer; model and training code are intentionally out of scope.
+The validation report checks identity/path leakage, forward-pair correctness against a brute-force oracle, prompt consistency, image decoding, split coverage, and pair concentration. The final diffusion training loop remains intentionally out of scope.
+
+## Model construction
+
+`src/model` builds one SD1.5-compatible bundle with a frozen VAE and CLIP text encoder, an 8-channel source-conditioned U-Net, and manual LoRA (or optional DoRA) attention adapters. The maintained default checkpoint is [`stable-diffusion-v1-5/stable-diffusion-v1-5`](https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5). Model weights are not included in this repository.
+
+On the training server, install `diffusers`, `transformers`, `accelerate`, and `safetensors` in the existing environment, then follow `notebooks/model.ipynb`. Offline model tests use small architecture-compatible doubles and never download weights.

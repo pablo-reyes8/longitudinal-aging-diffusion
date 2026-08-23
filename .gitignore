@@ -7,6 +7,13 @@ planning/
 manifest.csv
 splits.csv
 
+# Model weights and training checkpoints
+checkpoints/
+*.ckpt
+*.safetensors
+*.pt
+*.pth
+
 # Python
 __pycache__/
 *.py[cod]
