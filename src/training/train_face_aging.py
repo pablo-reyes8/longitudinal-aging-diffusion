@@ -156,6 +156,7 @@ def train_model(
     monitoring_text_guidance_scale: float = 7.0,
     monitoring_image_guidance_scale: float = 1.5,
     monitoring_seed: int = 2026,
+    monitoring_compute_diagnostics: bool = True,
     log_every: int = 25,
     seed: int = 42,
     deterministic: bool = False,
@@ -245,6 +246,7 @@ def train_model(
         "monitoring_strength": monitoring_strength,
         "monitoring_seed": monitoring_seed,
         "monitoring_target_ages": monitoring_ages,
+        "monitoring_compute_diagnostics": bool(monitoring_compute_diagnostics),
     }
     print("\n========== FACE AGING TRAINING ==========")
     print(f"device={resolved_device} | AMP={precision['amp_dtype_name']} | trainable tensors={len(trainables)}")
@@ -379,6 +381,7 @@ def train_model(
                     text_guidance_scale=monitoring_text_guidance_scale,
                     image_guidance_scale=monitoring_image_guidance_scale,
                     image_size=image_size,
+                    compute_diagnostics=monitoring_compute_diagnostics,
                 )
             epoch_record["checkpoint"] = checkpoint_report
             epoch_record["sampling"] = sampling_report

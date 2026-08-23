@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-EE4C2C?logo=pytorch&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Tests](https://img.shields.io/badge/tests-190%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-194%20passed-brightgreen)
 
 Supervised photo aging from real longitudinal observations. The project adapts
 Stable Diffusion 1.5 with source-image conditioning and lightweight LoRA/DoRA
@@ -139,6 +139,10 @@ Training monitoring accepts either one age or an ordered sweep. With
 `age_030.png`, `age_040.png`, `age_050.png`, `age_065.png`, and
 `age_sweep.png` below `monitoring/epoch_NNN/`. The source image, seed, mode, and
 guidance settings remain fixed across ages and epochs.
+When ArcFace and MiVOLO are attached, monitoring also annotates the grid with
+target age, predicted age, and source/generated identity cosine. Each epoch
+writes `sampling_diagnostics_epoch_NNN.csv`, while
+`monitoring/sampling_diagnostics_history.csv` appends the complete trajectory.
 
 Resume exactly from a training checkpoint with:
 
@@ -172,6 +176,9 @@ aging-infer \
 
 Inference accepts both lightweight adapter checkpoints and full training-resume
 checkpoints; optimizer, loader, and GradScaler state are not needed.
+`diagnose_checkpoint_age_sweep` loads either checkpoint format and returns a
+pandas DataFrame with predicted age, signed age error, and identity cosine while
+optionally saving the individual images, annotated grid, and CSV.
 
 ## Python and notebooks
 

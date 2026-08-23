@@ -3,10 +3,50 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import csv
 import inspect
 from pathlib import Path
 
 import torch
+
+
+DIAGNOSTIC_CSV_FIELDS = [
+    "epoch", "target_age", "predicted_generated_age", "identity_cosine", "mode", "seed"
+]
+
+
+def _diagnostic_row(*, epoch: int, result) -> dict | None:
+    diagnostics = result.get("diagnostics")
+    if diagnostics is None:
+        return None
+    return {
+        "epoch": int(epoch + 1),
+        "target_age": diagnostics["target_age"],
+        "predicted_generated_age": diagnostics["predicted_generated_age"],
+        "identity_cosine": diagnostics["identity_cosine_source_generated"],
+        "mode": result["mode"],
+        "seed": result["seed"],
+    }
+
+
+def _write_diagnostic_csvs(rows: list[dict], *, epoch: int, epoch_dir: Path, history_dir: Path):
+    if not rows:
+        return None, None
+    epoch_dir.mkdir(parents=True, exist_ok=True)
+    history_dir.mkdir(parents=True, exist_ok=True)
+    epoch_path = epoch_dir / f"sampling_diagnostics_epoch_{epoch + 1:03d}.csv"
+    with epoch_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=DIAGNOSTIC_CSV_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    history_path = history_dir / "sampling_diagnostics_history.csv"
+    write_header = not history_path.exists() or history_path.stat().st_size == 0
+    with history_path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=DIAGNOSTIC_CSV_FIELDS)
+        if write_header:
+            writer.writeheader()
+        writer.writerows(rows)
+    return epoch_path, history_path
 
 
 def normalize_monitoring_ages(target_age) -> tuple[list[int], bool]:
@@ -24,11 +64,11 @@ def normalize_monitoring_ages(target_age) -> tuple[list[int], bool]:
 
 
 def run_face_aging_monitor(
-    *, bundle, image, epoch: int, output_dir, target_prompt=None,
+    *, bundle, image, epoch: int, output_dir, loss_fn=None, target_prompt=None,
     target_age=None, source_prompt=None, source_age=None,
     mode="direct", use_inverse_diffusion=None, num_inference_steps=30,
     strength=0.45, text_guidance_scale=7.0, image_guidance_scale=1.5,
-    seed=2026, image_size=256,
+    seed=2026, image_size=256, compute_diagnostics: bool = True,
 ):
     """Generate one edit or an ordered age sweep from the same fixed image."""
     from src.inference import generate_age_sweep, infer_face_aging, save_inference_image
@@ -37,6 +77,11 @@ def run_face_aging_monitor(
     is_sweep = False
     if target_age is not None:
         ages, is_sweep = normalize_monitoring_ages(target_age)
+    identity_encoder = bundle.get("identity_encoder") or getattr(loss_fn, "identity_encoder", None)
+    age_estimator = bundle.get("age_estimator") or getattr(loss_fn, "age_estimator", None)
+    diagnostics_enabled = bool(
+        compute_diagnostics and identity_encoder is not None and age_estimator is not None
+    )
     if is_sweep:
         if target_prompt is not None:
             raise ValueError("target_prompt cannot be combined with a monitoring age sequence")
@@ -44,14 +89,20 @@ def run_face_aging_monitor(
         sweep = generate_age_sweep(
             bundle=bundle, image=image, ages=ages,
             output_path=epoch_dir / "age_sweep.png",
+            annotate_diagnostics=diagnostics_enabled,
+            include_source=True,
             source_prompt=source_prompt, source_age=source_age,
             mode=mode, use_inverse_diffusion=use_inverse_diffusion,
             num_inference_steps=num_inference_steps, strength=strength,
             text_guidance_scale=text_guidance_scale,
             image_guidance_scale=image_guidance_scale,
             seed=seed, image_size=image_size,
+            compute_diagnostics=diagnostics_enabled,
+            identity_encoder=identity_encoder,
+            age_estimator=age_estimator,
         )
         samples = []
+        diagnostic_rows = []
         for age, result in zip(ages, sweep["results"]):
             path = save_inference_image(result, epoch_dir / f"age_{age:03d}.png")
             samples.append({
@@ -59,7 +110,14 @@ def run_face_aging_monitor(
                 "output_path": str(path),
                 "target_prompt": result["target_prompt"],
                 "start_timestep": result["metadata"]["start_timestep"],
+                "diagnostics": result.get("diagnostics"),
             })
+            row = _diagnostic_row(epoch=epoch, result=result)
+            if row is not None:
+                diagnostic_rows.append(row)
+        epoch_csv, history_csv = _write_diagnostic_csvs(
+            diagnostic_rows, epoch=epoch, epoch_dir=epoch_dir, history_dir=Path(output_dir)
+        )
         return {
             "output_dir": str(epoch_dir),
             "grid_path": str(sweep["output_path"]),
@@ -67,6 +125,8 @@ def run_face_aging_monitor(
             "samples": samples,
             "mode": sweep["results"][0]["mode"],
             "seed": int(seed),
+            "diagnostics_csv": str(epoch_csv) if epoch_csv else None,
+            "diagnostics_history_csv": str(history_csv) if history_csv else None,
         }
 
     result = infer_face_aging(
@@ -78,12 +138,25 @@ def run_face_aging_monitor(
         text_guidance_scale=text_guidance_scale,
         image_guidance_scale=image_guidance_scale,
         seed=seed, image_size=image_size,
+        compute_diagnostics=diagnostics_enabled,
+        identity_encoder=identity_encoder,
+        age_estimator=age_estimator,
     )
     path = save_inference_image(result, Path(output_dir) / f"epoch_{epoch + 1:03d}.png")
+    row = _diagnostic_row(epoch=epoch, result=result)
+    epoch_csv, history_csv = _write_diagnostic_csvs(
+        [row] if row is not None else [],
+        epoch=epoch,
+        epoch_dir=Path(output_dir),
+        history_dir=Path(output_dir),
+    )
     return {
         "output_path": str(path), "mode": result["mode"],
         "target_prompt": result["target_prompt"], "target_age": result["target_age"],
         "seed": result["seed"], "start_timestep": result["metadata"]["start_timestep"],
+        "diagnostics": result.get("diagnostics"),
+        "diagnostics_csv": str(epoch_csv) if epoch_csv else None,
+        "diagnostics_history_csv": str(history_csv) if history_csv else None,
     }
 
 

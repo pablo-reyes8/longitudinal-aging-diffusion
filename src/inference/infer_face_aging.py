@@ -16,6 +16,7 @@ from .ddim_inversion import (
     edit_from_inverted_latent,
     scheduler_reverse_step,
 )
+from .diagnostics import compute_face_aging_diagnostics
 from .inference_utils import (
     create_inference_scheduler,
     decode_latents_to_tensor,
@@ -133,7 +134,7 @@ def infer_face_aging(
     return_dict: bool = True,
     return_latents: bool = False,
     return_intermediates: bool = False,
-    compute_diagnostics: bool = False,
+    compute_diagnostics: bool = True,
     identity_encoder=None,
     age_estimator=None,
     device: str | torch.device | None = None,
@@ -203,17 +204,17 @@ def infer_face_aging(
         bundle["unet"].train(previous_mode)
         bundle["vae"].eval(); bundle["text_encoder"].eval()
     formatted = _format_images(image_tensor, output_type)
-    diagnostics = {}
-    if compute_diagnostics:
-        identity_encoder = identity_encoder or bundle.get("identity_encoder")
-        age_estimator = age_estimator or bundle.get("age_estimator")
-        source_01 = (source_images.float() / 2 + 0.5).clamp(0, 1)
-        if identity_encoder is not None:
-            source_embedding = identity_encoder(source_01)
-            generated_embedding = identity_encoder(image_tensor.to(source_01.device))
-            diagnostics["identity_cosine_source_generated"] = float((source_embedding * generated_embedding).sum(-1).mean())
-        if age_estimator is not None:
-            diagnostics["predicted_generated_age"] = float(age_estimator(image_tensor.to(source_01.device)).mean())
+    diagnostics = None
+    if compute_diagnostics and prompt_pack["target_age"] is not None:
+        diagnostics = compute_face_aging_diagnostics(
+            bundle=bundle,
+            source_image=source_images.float().div(2).add(0.5),
+            generated_image=image_tensor,
+            target_age=prompt_pack["target_age"],
+            image_size=image_size,
+            identity_encoder=identity_encoder,
+            age_estimator=age_estimator,
+        )
     result: dict[str, Any] = {
         "image": formatted,
         "image_tensor": image_tensor.detach().cpu(),

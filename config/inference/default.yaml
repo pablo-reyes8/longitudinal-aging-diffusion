@@ -14,4 +14,4 @@ output_type: pil
 return_dict: true
 return_latents: false
 return_intermediates: false
-compute_diagnostics: false
+compute_diagnostics: true

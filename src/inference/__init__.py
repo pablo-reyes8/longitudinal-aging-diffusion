@@ -5,6 +5,10 @@ from .checkpoint_loading import (
     load_face_aging_adapter_for_inference,
     load_face_aging_inference_bundle,
 )
+from .checkpoint_diagnostics import (
+    diagnose_checkpoint_age_sweep,
+    diagnose_checkpoints_age_sweep,
+)
 from .comparison_helpers import compare_inference_modes, generate_age_sweep
 from .ddim_inversion import (
     ddim_forward_step,
@@ -12,6 +16,7 @@ from .ddim_inversion import (
     edit_from_inverted_latent,
     model_output_to_x0_epsilon,
 )
+from .diagnostics import compute_face_aging_diagnostics
 from .infer_face_aging import (
     infer_face_aging,
     infer_face_aging_direct,
