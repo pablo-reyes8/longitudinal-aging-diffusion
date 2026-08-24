@@ -7,13 +7,17 @@ planning/
 manifest.csv
 splits.csv
 
-# Model weights and training checkpoints
+# Model weights and training checkpoints. Diagnostic images/CSVs/JSON/logs
+# inside output/models remain trackable; only weight files are excluded.
 checkpoints/
 artifacts/
 outputs/
-output/models/
 runs/
 .cache/
+output/models/**/*.ckpt
+output/models/**/*.safetensors
+output/models/**/*.pt
+output/models/**/*.pth
 *.ckpt
 *.safetensors
 *.pt
