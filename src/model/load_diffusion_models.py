@@ -16,6 +16,7 @@ from torch import nn
 from .DoRa import inject_manual_dora_unet
 from .LoRa import DEFAULT_ATTENTION_TARGETS, inject_manual_lora_unet
 from .age_conditioning import (
+    AgeConditionerV2,
     AgeDeltaConditioner,
     infer_unet_time_embedding_dim,
     install_age_conditioned_time_embedding,
@@ -262,9 +263,14 @@ def assemble_face_aging_diffusion_bundle(
     source_conditioning: str = "concat",
     use_age_delta_conditioning: bool = True,
     age_conditioning_mode: str = "delta_mlp",
+    use_age_conditioner_v2: bool = True,
+    age_conditioning_version: str | None = None,
     age_delta_scale: float = 80.0,
-    age_condition_hidden_dim: int = 128,
+    age_condition_hidden_dim: int = 256,
     age_condition_output_dim: int | None = None,
+    num_fourier_frequencies: int = 8,
+    age_condition_use_raw_scalars: bool = True,
+    age_condition_use_gate: bool = True,
     trainable_dtype: torch.dtype = torch.float32,
     verbose: bool = True,
 ) -> dict[str, Any]:
@@ -280,6 +286,15 @@ def assemble_face_aging_diffusion_bundle(
         raise ValueError("adapter_type must be 'lora' or 'dora'")
     if age_conditioning_mode != "delta_mlp":
         raise ValueError("V1 supports age_conditioning_mode='delta_mlp'")
+    resolved_age_version = age_conditioning_version or (
+        "v2_fourier" if use_age_conditioner_v2 else "v1_delta"
+    )
+    expected_age_version = "v2_fourier" if use_age_conditioner_v2 else "v1_delta"
+    if resolved_age_version != expected_age_version:
+        raise ValueError(
+            f"age_conditioning_version={resolved_age_version!r} conflicts with "
+            f"use_age_conditioner_v2={use_age_conditioner_v2}"
+        )
     unet = components["unet"]
     conv_report = expand_unet_conv_in_for_source_conditioning(unet)
     injection = inject_manual_lora_unet if adapter_type == "lora" else inject_manual_dora_unet
@@ -295,7 +310,7 @@ def assemble_face_aging_diffusion_bundle(
     trainable_params, trainable_names = configure_face_aging_trainable_parameters(
         components["vae"], components["text_encoder"], unet, trainable_dtype=trainable_dtype
     )
-    age_delta_conditioner = None
+    age_conditioner = None
     age_conditioning_config = None
     if use_age_delta_conditioning:
         inferred_output_dim = infer_unet_time_embedding_dim(unet)
@@ -306,15 +321,28 @@ def assemble_face_aging_diffusion_bundle(
             )
         install_age_conditioned_time_embedding(unet, output_dim)
         unet_device = next(unet.parameters()).device
-        age_delta_conditioner = AgeDeltaConditioner(
-            hidden_dim=age_condition_hidden_dim,
-            output_dim=output_dim,
-            age_delta_scale=age_delta_scale,
-        ).to(device=unet_device, dtype=trainable_dtype)
-        age_conditioning_config = age_delta_conditioner.get_config()
+        if use_age_conditioner_v2:
+            age_conditioner = AgeConditionerV2(
+                num_fourier_frequencies=num_fourier_frequencies,
+                hidden_dim=age_condition_hidden_dim,
+                output_dim=output_dim,
+                delta_age_scale=age_delta_scale,
+                use_raw_scalars=age_condition_use_raw_scalars,
+                use_gate=age_condition_use_gate,
+            )
+            conditioner_prefix = "age_conditioner"
+        else:
+            age_conditioner = AgeDeltaConditioner(
+                hidden_dim=age_condition_hidden_dim,
+                output_dim=output_dim,
+                age_delta_scale=age_delta_scale,
+            )
+            conditioner_prefix = "age_delta_conditioner"
+        age_conditioner = age_conditioner.to(device=unet_device, dtype=trainable_dtype)
+        age_conditioning_config = age_conditioner.get_config()
         conditioner_named = [
-            (f"age_delta_conditioner.{name}", parameter)
-            for name, parameter in age_delta_conditioner.named_parameters()
+            (f"{conditioner_prefix}.{name}", parameter)
+            for name, parameter in age_conditioner.named_parameters()
         ]
         trainable_names.extend(name for name, _ in conditioner_named)
         trainable_params.extend(parameter for _, parameter in conditioner_named)
@@ -333,9 +361,14 @@ def assemble_face_aging_diffusion_bundle(
         "trainable_dtype": str(trainable_dtype),
         "use_age_delta_conditioning": bool(use_age_delta_conditioning),
         "age_conditioning_mode": age_conditioning_mode,
+        "use_age_conditioner_v2": bool(use_age_conditioner_v2),
+        "age_conditioning_version": resolved_age_version,
         "age_delta_scale": float(age_delta_scale),
         "age_condition_hidden_dim": int(age_condition_hidden_dim),
         "age_condition_output_dim": age_conditioning_config["output_dim"] if age_conditioning_config else None,
+        "num_fourier_frequencies": int(num_fourier_frequencies),
+        "age_condition_use_raw_scalars": bool(age_condition_use_raw_scalars),
+        "age_condition_use_gate": bool(age_condition_use_gate),
     }
     bundle = {
         **dict(components),
@@ -351,8 +384,12 @@ def assemble_face_aging_diffusion_bundle(
         "source_conditioning": source_conditioning,
         "use_age_delta_conditioning": bool(use_age_delta_conditioning),
         "age_conditioning_mode": age_conditioning_mode,
+        "use_age_conditioner_v2": bool(use_age_conditioner_v2),
+        "age_conditioning_version": resolved_age_version,
         "age_delta_scale": float(age_delta_scale),
-        "age_delta_conditioner": age_delta_conditioner,
+        "age_conditioner": age_conditioner,
+        # Compatibility alias for code written against milestone 07.
+        "age_delta_conditioner": age_conditioner,
         "age_conditioning_config": age_conditioning_config,
         "conv_in_report": conv_report,
         "trainable_params": trainable_params,
@@ -361,7 +398,8 @@ def assemble_face_aging_diffusion_bundle(
             "unet": count_parameters(unet),
             "vae": count_parameters(components["vae"]),
             "text_encoder": count_parameters(components["text_encoder"]),
-            "age_delta_conditioner": count_parameters(age_delta_conditioner) if age_delta_conditioner is not None else None,
+            "age_conditioner": count_parameters(age_conditioner) if age_conditioner is not None else None,
+            "age_delta_conditioner": count_parameters(age_conditioner) if age_conditioner is not None else None,
         },
         "config": config,
     }
@@ -382,9 +420,14 @@ def build_face_aging_diffusion_bundle(
     source_conditioning: str = "concat",
     use_age_delta_conditioning: bool = True,
     age_conditioning_mode: str = "delta_mlp",
+    use_age_conditioner_v2: bool = True,
+    age_conditioning_version: str | None = None,
     age_delta_scale: float = 80.0,
-    age_condition_hidden_dim: int = 128,
+    age_condition_hidden_dim: int = 256,
     age_condition_output_dim: int | None = None,
+    num_fourier_frequencies: int = 8,
+    age_condition_use_raw_scalars: bool = True,
+    age_condition_use_gate: bool = True,
     device: str | torch.device | None = None,
     dtype: torch.dtype | None = None,
     trainable_dtype: torch.dtype = torch.float32,
@@ -428,9 +471,14 @@ def build_face_aging_diffusion_bundle(
         source_conditioning=source_conditioning,
         use_age_delta_conditioning=use_age_delta_conditioning,
         age_conditioning_mode=age_conditioning_mode,
+        use_age_conditioner_v2=use_age_conditioner_v2,
+        age_conditioning_version=age_conditioning_version,
         age_delta_scale=age_delta_scale,
         age_condition_hidden_dim=age_condition_hidden_dim,
         age_condition_output_dim=age_condition_output_dim,
+        num_fourier_frequencies=num_fourier_frequencies,
+        age_condition_use_raw_scalars=age_condition_use_raw_scalars,
+        age_condition_use_gate=age_condition_use_gate,
         trainable_dtype=trainable_dtype,
         verbose=verbose,
     )
@@ -477,10 +525,10 @@ def print_parameter_report(bundle: Mapping[str, Any], max_names: int = 30) -> No
         f"({stats['unet']['trainable_pct']:.4f}% trainable)",
     )
     print("Trainable tensors:", len(bundle["trainable_param_names"]))
-    if bundle.get("age_delta_conditioner") is not None:
-        stats_age = stats["age_delta_conditioner"]
+    if bundle.get("age_conditioner") is not None:
+        stats_age = stats["age_conditioner"]
         print(
-            "Age-delta conditioner:",
+            f"Age conditioner ({bundle['age_conditioning_version']}):",
             f"{stats_age['trainable_params']:,} trainable parameters",
             f"| scale={bundle['age_delta_scale']}",
         )
@@ -496,10 +544,17 @@ def get_bundle_trainable_named_parameters(bundle: Mapping[str, Any]) -> list[tup
         for name, parameter in bundle["unet"].named_parameters()
         if parameter.requires_grad
     ]
-    conditioner = bundle.get("age_delta_conditioner")
+    conditioner = bundle.get("age_conditioner")
+    if conditioner is None:
+        conditioner = bundle.get("age_delta_conditioner")
     if conditioner is not None:
+        prefix = (
+            "age_conditioner"
+            if bundle.get("age_conditioning_version") == "v2_fourier"
+            else "age_delta_conditioner"
+        )
         named.extend(
-            (f"age_delta_conditioner.{name}", parameter)
+            (f"{prefix}.{name}", parameter)
             for name, parameter in conditioner.named_parameters()
             if parameter.requires_grad
         )
@@ -521,10 +576,15 @@ def build_face_aging_optimizer(
 ) -> torch.optim.Optimizer:
     named = get_bundle_trainable_named_parameters(bundle)
     conv = [(name, parameter) for name, parameter in named if name.startswith("conv_in.")]
-    age_conditioner = [(name, parameter) for name, parameter in named if name.startswith("age_delta_conditioner.")]
+    age_conditioner = [
+        (name, parameter) for name, parameter in named
+        if name.startswith("age_delta_conditioner.") or name.startswith("age_conditioner.")
+    ]
     adapters = [
         (name, parameter) for name, parameter in named
-        if not name.startswith("conv_in.") and not name.startswith("age_delta_conditioner.")
+        if not name.startswith("conv_in.")
+        and not name.startswith("age_delta_conditioner.")
+        and not name.startswith("age_conditioner.")
     ]
     if not conv or not adapters:
         raise RuntimeError(f"Expected both adapter and conv_in parameter groups; conv={len(conv)}, adapters={len(adapters)}")
@@ -678,9 +738,18 @@ def load_face_aging_adapter(
         "model_id", "adapter_type", "rank", "target_modules", "source_conditioning",
         "unet_in_channels", "unet_cross_attention_dim", "use_age_delta_conditioning",
         "age_conditioning_mode", "age_delta_scale", "age_condition_hidden_dim",
-        "age_condition_output_dim",
+        "age_condition_output_dim", "use_age_conditioner_v2", "age_conditioning_version",
+        "num_fourier_frequencies", "age_condition_use_raw_scalars", "age_condition_use_gate",
     )
-    mismatches = {key: {"checkpoint": saved.get(key), "bundle": current.get(key)} for key in protected if saved.get(key) != current.get(key)}
+    v2_only = {
+        "use_age_conditioner_v2", "age_conditioning_version", "num_fourier_frequencies",
+        "age_condition_use_raw_scalars", "age_condition_use_gate",
+    }
+    mismatches = {
+        key: {"checkpoint": saved.get(key), "bundle": current.get(key)}
+        for key in protected
+        if (key not in v2_only or key in saved) and saved.get(key) != current.get(key)
+    }
     if strict_backbone and mismatches:
         raise ValueError(f"Adapter checkpoint is incompatible with this bundle: {mismatches}")
     current_parameters = dict(get_bundle_trainable_named_parameters(bundle))

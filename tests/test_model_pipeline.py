@@ -86,7 +86,11 @@ def test_two_step_gradient_nuance_and_parameter_changes():
     trainable_before = {n: p.detach().clone() for n, p in unet.named_parameters() if p.requires_grad}
     for _ in range(2):
         optimizer.zero_grad(set_to_none=True)
-        age_conditioning = bundle["age_delta_conditioner"](torch.tensor([10.0, 30.0]))
+        age_conditioning = bundle["age_conditioner"](
+            torch.tensor([20.0, 20.0]),
+            torch.tensor([30.0, 50.0]),
+            torch.tensor([10.0, 30.0]),
+        )
         output = unet(
             torch.randn(2, 8, 4, 4), torch.tensor([3, 7]), torch.randn(2, 12, 6),
             timestep_cond=age_conditioning,

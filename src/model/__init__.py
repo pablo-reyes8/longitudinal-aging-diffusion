@@ -4,6 +4,7 @@ from .DoRa import DoRALinear, inject_manual_dora_unet
 from .LoRa import DEFAULT_ATTENTION_TARGETS, LoRALinear, inject_manual_lora_unet
 from .age_conditioning import (
     AgeConditionedTimeEmbedding,
+    AgeConditionerV2,
     AgeDeltaConditioner,
     compute_age_delta_embedding,
     infer_unet_time_embedding_dim,

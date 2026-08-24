@@ -79,6 +79,133 @@ class AgeDeltaConditioner(nn.Module):
         }
 
 
+class AgeConditionerV2(nn.Module):
+    """Encode source, target and relative age with raw and Fourier features."""
+
+    def __init__(
+        self,
+        num_fourier_frequencies: int = 8,
+        hidden_dim: int = 256,
+        output_dim: int = 1280,
+        *,
+        source_age_scale: float = 100.0,
+        target_age_scale: float = 100.0,
+        delta_age_scale: float = 80.0,
+        activation: str = "silu",
+        use_raw_scalars: bool = True,
+        use_layernorm: bool = False,
+        dropout: float = 0.0,
+        use_gate: bool = True,
+        initial_gate: float = 1.0,
+    ) -> None:
+        super().__init__()
+        if num_fourier_frequencies <= 0 or hidden_dim <= 0 or output_dim <= 0:
+            raise ValueError("Fourier frequencies and MLP dimensions must be positive")
+        if min(source_age_scale, target_age_scale, delta_age_scale) <= 0:
+            raise ValueError("Age normalization scales must be positive")
+        if activation != "silu":
+            raise ValueError("V2 supports activation='silu'")
+        if not 0 <= dropout < 1:
+            raise ValueError("dropout must be in [0,1)")
+        input_dim = 3 * 2 * int(num_fourier_frequencies) + (3 if use_raw_scalars else 0)
+        layers: list[nn.Module] = [nn.Linear(input_dim, hidden_dim), nn.SiLU()]
+        if use_layernorm:
+            layers.append(nn.LayerNorm(hidden_dim))
+        if dropout:
+            layers.append(nn.Dropout(dropout))
+        layers.append(nn.Linear(hidden_dim, output_dim))
+        self.network = nn.Sequential(*layers)
+        self.register_buffer(
+            "fourier_frequencies",
+            torch.pow(2.0, torch.arange(num_fourier_frequencies, dtype=torch.float32)) * torch.pi,
+            persistent=False,
+        )
+        self.age_scale = nn.Parameter(torch.tensor(float(initial_gate))) if use_gate else None
+        self.num_fourier_frequencies = int(num_fourier_frequencies)
+        self.hidden_dim = int(hidden_dim)
+        self.output_dim = int(output_dim)
+        self.source_age_scale = float(source_age_scale)
+        self.target_age_scale = float(target_age_scale)
+        self.delta_age_scale = float(delta_age_scale)
+        self.activation = activation
+        self.use_raw_scalars = bool(use_raw_scalars)
+        self.use_layernorm = bool(use_layernorm)
+        self.dropout = float(dropout)
+        self.use_gate = bool(use_gate)
+        self.initial_gate = float(initial_gate)
+
+        # Preserve the pretrained U-Net closely while allowing useful gradients
+        # through every input feature from the first update.
+        nn.init.normal_(self.network[-1].weight, mean=0.0, std=1e-3)
+        nn.init.zeros_(self.network[-1].bias)
+
+    @staticmethod
+    def _column(values: torch.Tensor, name: str, *, device, dtype) -> torch.Tensor:
+        tensor = torch.as_tensor(values, device=device, dtype=dtype)
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(-1)
+        if tensor.ndim != 2 or tensor.shape[1] != 1:
+            raise ValueError(f"{name} must have shape [B] or [B,1]")
+        return tensor
+
+    def fourier_features(
+        self,
+        source_age: torch.Tensor,
+        target_age: torch.Tensor,
+        delta_age: torch.Tensor,
+    ) -> torch.Tensor:
+        parameter = next(self.network.parameters())
+        source = self._column(source_age, "source_age", device=parameter.device, dtype=parameter.dtype)
+        target = self._column(target_age, "target_age", device=parameter.device, dtype=parameter.dtype)
+        delta = self._column(delta_age, "delta_age", device=parameter.device, dtype=parameter.dtype)
+        if source.shape[0] != target.shape[0] or source.shape[0] != delta.shape[0]:
+            raise ValueError("source_age, target_age, and delta_age batch sizes must match")
+        normalized = torch.cat(
+            (source / self.source_age_scale, target / self.target_age_scale, delta / self.delta_age_scale),
+            dim=1,
+        )
+        angles = normalized.unsqueeze(-1) * self.fourier_frequencies.to(
+            device=parameter.device, dtype=parameter.dtype
+        )
+        fourier = torch.cat((angles.sin(), angles.cos()), dim=-1).flatten(1)
+        features = torch.cat((normalized, fourier), dim=1) if self.use_raw_scalars else fourier
+        if not torch.isfinite(features).all():
+            raise FloatingPointError("Age Fourier features contain NaN/Inf")
+        return features
+
+    def forward(
+        self,
+        source_age: torch.Tensor,
+        target_age: torch.Tensor,
+        delta_age: torch.Tensor,
+    ) -> torch.Tensor:
+        embedding = self.network(self.fourier_features(source_age, target_age, delta_age))
+        if self.age_scale is not None:
+            embedding = self.age_scale * embedding
+        if not torch.isfinite(embedding).all():
+            raise FloatingPointError("Age conditioning produced NaN/Inf")
+        return embedding
+
+    def get_config(self) -> dict[str, Any]:
+        return {
+            "version": "v2_fourier",
+            "inputs": "source_target_delta",
+            "num_fourier_frequencies": self.num_fourier_frequencies,
+            "input_dim": self.network[0].in_features,
+            "hidden_dim": self.hidden_dim,
+            "output_dim": self.output_dim,
+            "source_age_scale": self.source_age_scale,
+            "target_age_scale": self.target_age_scale,
+            "delta_age_scale": self.delta_age_scale,
+            "activation": self.activation,
+            "use_raw_scalars": self.use_raw_scalars,
+            "use_layernorm": self.use_layernorm,
+            "dropout": self.dropout,
+            "use_gate": self.use_gate,
+            "initial_gate": self.initial_gate,
+        }
+
+
 class AgeConditionedTimeEmbedding(nn.Module):
     """Add an already projected age vector to Diffusers' timestep embedding."""
 
@@ -133,11 +260,15 @@ def compute_age_delta_embedding(
     delta_age: torch.Tensor | None,
     *,
     batch_size: int,
+    source_age: torch.Tensor | None = None,
+    target_age: torch.Tensor | None = None,
 ) -> torch.Tensor | None:
     """Return an explicit U-Net timestep condition, or ``None`` when disabled."""
     if not bundle.get("use_age_delta_conditioning", False):
         return None
-    conditioner = bundle.get("age_delta_conditioner")
+    conditioner = bundle.get("age_conditioner")
+    if conditioner is None:
+        conditioner = bundle.get("age_delta_conditioner")
     if conditioner is None:
         raise RuntimeError("Bundle enables age-delta conditioning but has no conditioner")
     if delta_age is None:
@@ -147,4 +278,8 @@ def compute_age_delta_embedding(
         values = values[:, 0]
     if values.ndim != 1 or values.shape[0] != batch_size:
         raise ValueError(f"delta_age must have shape [{batch_size}]")
+    if isinstance(conditioner, AgeConditionerV2):
+        if source_age is None or target_age is None:
+            raise ValueError("source_age and target_age are required by AgeConditionerV2")
+        return conditioner(source_age, target_age, values)
     return conditioner(values)

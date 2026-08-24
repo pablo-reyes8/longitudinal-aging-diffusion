@@ -117,7 +117,8 @@ def test_checkpoint_diagnostic_age_error_and_generation_match_normal_inference(t
         "checkpoint", "source_age", "target_age", "target_delta_age",
         "predicted_source_age", "predicted_generated_age", "predicted_delta_age",
         "age_error", "delta_age_error", "identity_cosine", "mode", "strength",
-        "num_inference_steps", "text_guidance_scale", "image_guidance_scale", "seed",
+        "num_inference_steps", "text_guidance_scale", "text_reference_mode",
+        "age_guidance_scale", "image_guidance_scale", "seed",
     ]
     assert torch.equal(
         torch.tensor(frame["age_error"].to_numpy()),
@@ -163,3 +164,39 @@ def test_conditioning_isolation_runs_nine_matched_cases_without_writing(tmp_path
     printed = capsys.readouterr().out
     assert "CONDITIONING ISOLATION DIAGNOSTIC" in printed
     assert "delta_only" in printed and "text_only" in printed
+
+
+def test_checkpoint_sweeps_compare_all_referenced_cfg_modes_and_write_metadata(tmp_path):
+    original = make_training_bundle(seed=884)
+    checkpoint = atomic_torch_save(
+        build_inference_payload(original, {"image_size": 32}),
+        tmp_path / "adapter.pt",
+    )
+    rebuilt = attach_diagnostics(make_training_bundle(seed=884))
+    image = Image.new("RGB", (38, 32), (110, 75, 55))
+    predictions = {}
+    for reference_mode in ("source_age", "generic", "null"):
+        frame = diagnose_checkpoint_age_sweep(
+            checkpoint_path=checkpoint,
+            bundle=rebuilt,
+            source_image=image,
+            source_age=26,
+            target_ages=[30, 40, 65],
+            output_dir=tmp_path / reference_mode,
+            mode="direct",
+            text_reference_mode=reference_mode,
+            age_guidance_scale=3.0 if reference_mode != "null" else 7.0,
+            num_inference_steps=2,
+            strength=0.35,
+            seed=2026,
+            image_size=32,
+        )
+        assert frame["text_reference_mode"].unique().tolist() == [reference_mode]
+        assert (tmp_path / reference_mode / "sampling_diagnostics.csv").exists()
+        predictions[reference_mode] = frame["predicted_generated_age"].to_numpy()
+    assert not torch.equal(
+        torch.tensor(predictions["source_age"]), torch.tensor(predictions["generic"])
+    )
+    assert not torch.equal(
+        torch.tensor(predictions["source_age"]), torch.tensor(predictions["null"])
+    )

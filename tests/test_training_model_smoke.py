@@ -49,6 +49,10 @@ def test_train_agging_model_real_loader_mixed_precision_checkpoint_and_validatio
         assert f"{prefix}/loss_relative_age" in metrics
         assert f"{prefix}/weighted_relative_age" in metrics
         assert torch.isfinite(torch.tensor(metrics[f"{prefix}/loss_relative_age"]))
+    train_metrics = result["history"]["train"][0]
+    assert train_metrics["train/numeric_prompt_count"] + train_metrics["train/generic_prompt_count"] == 8
+    assert train_metrics["train/numeric_prompt_fraction"] + train_metrics["train/generic_prompt_fraction"] == pytest.approx(1.0)
+    assert "train/age_conditioner_scale" in train_metrics
     assert result["memory_features"] == {"gradient_checkpointing": "unavailable", "xformers": "unavailable"}
     changed = {name for name, p in bundle["unet"].named_parameters() if p.requires_grad and not torch.equal(p, trainable[name])}
     assert any(name.startswith("conv_in") for name in changed)

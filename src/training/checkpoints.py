@@ -21,6 +21,8 @@ PROTECTED_BUNDLE_KEYS = (
     "identity_model_id", "age_model_id",
     "use_age_delta_conditioning", "age_conditioning_mode", "age_delta_scale",
     "age_condition_hidden_dim", "age_condition_output_dim",
+    "use_age_conditioner_v2", "age_conditioning_version", "num_fourier_frequencies",
+    "age_condition_use_raw_scalars", "age_condition_use_gate",
 )
 PROTECTED_TRAINING_KEYS = (
     "max_train_steps", "total_planned_optimizer_steps", "grad_accum_steps",
@@ -29,8 +31,14 @@ PROTECTED_TRAINING_KEYS = (
     "sample_target_posterior", "noise_offset", "min_snr_gamma",
     "auxiliary_max_timestep", "image_size",
     "use_age_delta_conditioning", "age_conditioning_mode", "age_delta_scale",
+    "use_age_conditioner_v2", "age_conditioning_version",
     "use_relative_age_loss", "relative_age_weight", "relative_age_loss_type",
+    "target_prompt_policy", "generic_prompt_prob", "numeric_prompt_prob",
 )
+V2_ONLY_BUNDLE_KEYS = {
+    "use_age_conditioner_v2", "age_conditioning_version", "num_fourier_frequencies",
+    "age_condition_use_raw_scalars", "age_condition_use_gate",
+}
 
 
 def get_trainable_state_dict(bundle: Mapping[str, Any]) -> dict[str, torch.Tensor]:
@@ -95,7 +103,8 @@ def validate_checkpoint_compatibility(
     mismatches = {
         key: {"checkpoint": saved_bundle.get(key), "current": current_bundle.get(key)}
         for key in PROTECTED_BUNDLE_KEYS
-        if saved_bundle.get(key) != current_bundle.get(key)
+        if (key not in V2_ONLY_BUNDLE_KEYS or key in saved_bundle)
+        and saved_bundle.get(key) != current_bundle.get(key)
     }
     saved_loss = payload.get("loss_config")
     current_loss = loss_fn.get_config() if hasattr(loss_fn, "get_config") else None

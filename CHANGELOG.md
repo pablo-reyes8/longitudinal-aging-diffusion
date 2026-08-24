@@ -17,3 +17,9 @@ to use semantic versioning after its first stable release.
 - Explicit age-delta MLP conditioning, relative-age supervision, and
   source/generated age-delta diagnostics.
 - In-memory conditioning-isolation diagnostic for CLIP text versus age-delta control.
+- Fourier Age Conditioner V2 over source age, target age, and signed age delta,
+  with checkpoint-compatible V1 loading and an optional trainable output gate.
+- Referenced classifier-free guidance with source-age, generic, and exact
+  legacy null-reference modes for direct inference and training monitoring.
+- Independent per-sample numeric/generic prompt regularization for training,
+  including deterministic sampling and epoch-level policy diagnostics.

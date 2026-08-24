@@ -6,12 +6,15 @@ from PIL import Image
 
 from src.inference import infer_face_aging_direct
 from src.model import (
+    AgeConditionerV2,
     AgeDeltaConditioner,
+    assemble_face_aging_diffusion_bundle,
     build_face_aging_optimizer,
     compute_age_delta_embedding,
     load_face_aging_adapter,
     save_face_aging_adapter,
 )
+from model_fakes import make_fake_components
 from src.training import run_training_step
 from training_fakes import make_training_bundle, make_training_loss
 
@@ -40,6 +43,56 @@ def test_age_delta_conditioner_shape_determinism_variation_zero_and_negative():
     assert torch.isfinite(one_dimensional).all()
 
 
+def test_age_conditioner_v2_fourier_shapes_determinism_and_age_sensitivity():
+    torch.manual_seed(71)
+    conditioner = AgeConditionerV2(
+        num_fourier_frequencies=8, hidden_dim=32, output_dim=64,
+        use_raw_scalars=True, use_gate=True,
+    )
+    source = torch.tensor([10.0, 26.0, 80.0, 50.0])
+    target = torch.tensor([10.0, 30.0, 110.0, 30.0])
+    delta = torch.tensor([0.0, 4.0, 30.0, -20.0])
+    features = conditioner.fourier_features(source, target, delta)
+    repeated = conditioner.fourier_features(source[:, None], target[:, None], delta[:, None])
+    output = conditioner(source, target, delta)
+    assert features.shape == (4, 3 + 3 * 2 * 8)
+    assert torch.equal(features, repeated)
+    assert output.shape == (4, 64) and torch.isfinite(output).all()
+    assert not torch.equal(
+        conditioner(torch.tensor([20.0]), torch.tensor([30.0]), torch.tensor([10.0])),
+        conditioner(torch.tensor([20.0]), torch.tensor([60.0]), torch.tensor([40.0])),
+    )
+    assert not torch.equal(
+        conditioner(torch.tensor([20.0]), torch.tensor([30.0]), torch.tensor([10.0])),
+        conditioner(torch.tensor([40.0]), torch.tensor([50.0]), torch.tensor([10.0])),
+    )
+
+
+def test_age_conditioner_v2_gate_is_trainable_and_zero_recovers_base_timestep_path():
+    bundle = make_training_bundle(seed=904)
+    conditioner = bundle["age_conditioner"]
+    assert conditioner.age_scale is not None and conditioner.age_scale.requires_grad
+    sample = torch.randn(2, 8, 4, 4)
+    timesteps = torch.tensor([3, 7])
+    hidden = torch.randn(2, 12, 6)
+    with torch.no_grad():
+        conditioner.age_scale.zero_()
+    condition = conditioner(
+        torch.tensor([20.0, 30.0]), torch.tensor([40.0, 65.0]), torch.tensor([20.0, 35.0])
+    )
+    assert torch.count_nonzero(condition) == 0
+    with_condition = bundle["unet"](sample, timesteps, hidden, timestep_cond=condition).sample
+    without_condition = bundle["unet"](sample, timesteps, hidden).sample
+    assert torch.equal(with_condition, without_condition)
+    with torch.no_grad():
+        conditioner.age_scale.fill_(1.0)
+    conditioner.zero_grad(set_to_none=True)
+    conditioner(
+        torch.tensor([20.0, 30.0]), torch.tensor([40.0, 65.0]), torch.tensor([20.0, 35.0])
+    ).square().mean().backward()
+    assert conditioner.age_scale.grad is not None and torch.isfinite(conditioner.age_scale.grad)
+
+
 def test_bundle_delta_embedding_changes_unet_output_and_receives_optimizer_update():
     bundle = make_training_bundle(seed=901)
     loss_fn = make_training_loss(bundle, auxiliaries=False)
@@ -60,8 +113,15 @@ def test_bundle_delta_embedding_changes_unet_output_and_receives_optimizer_updat
         for name, parameter in bundle["age_delta_conditioner"].named_parameters()
     )
 
-    first = compute_age_delta_embedding(bundle, torch.tensor([10.0, 10.0]), batch_size=2)
-    second = compute_age_delta_embedding(bundle, torch.tensor([40.0, 40.0]), batch_size=2)
+    source = torch.tensor([20.0, 30.0])
+    first = compute_age_delta_embedding(
+        bundle, torch.tensor([10.0, 10.0]), batch_size=2,
+        source_age=source, target_age=source + 10,
+    )
+    second = compute_age_delta_embedding(
+        bundle, torch.tensor([40.0, 40.0]), batch_size=2,
+        source_age=source, target_age=source + 40,
+    )
     assert not torch.equal(first, second)
 
 
@@ -79,6 +139,40 @@ def test_conditioner_checkpoint_roundtrip(tmp_path):
         rebuilt["age_delta_conditioner"].state_dict().items(),
     ):
         assert name_a == name_b and torch.equal(value_a, value_b)
+
+
+def test_legacy_v1_checkpoint_without_v2_metadata_still_loads(tmp_path):
+    def legacy_bundle(seed):
+        torch.manual_seed(seed)
+        return assemble_face_aging_diffusion_bundle(
+            make_fake_components(), model_id="offline/legacy-v1", rank=2, alpha=2,
+            use_age_conditioner_v2=False, age_conditioning_version="v1_delta",
+            age_condition_hidden_dim=128, verbose=False,
+        )
+    original = legacy_bundle(905)
+    checkpoint = save_face_aging_adapter(original, tmp_path / "legacy.pt")
+    payload = torch.load(checkpoint, weights_only=True)
+    for key in (
+        "use_age_conditioner_v2", "age_conditioning_version", "num_fourier_frequencies",
+        "age_condition_use_raw_scalars", "age_condition_use_gate",
+    ):
+        payload["config"].pop(key, None)
+    torch.save(payload, checkpoint)
+    rebuilt = legacy_bundle(906)
+    report = load_face_aging_adapter(rebuilt, checkpoint)
+    assert report["loaded_tensors"] == len(original["trainable_param_names"])
+
+
+def test_v2_checkpoint_rejects_fourier_configuration_mismatch(tmp_path):
+    original = make_training_bundle(seed=906)
+    checkpoint = save_face_aging_adapter(original, tmp_path / "v2.pt")
+    torch.manual_seed(906)
+    incompatible = assemble_face_aging_diffusion_bundle(
+        make_fake_components(), model_id="offline/sd15-shaped", rank=2, alpha=2,
+        num_fourier_frequencies=4, verbose=False,
+    )
+    with pytest.raises(ValueError, match="incompatible"):
+        load_face_aging_adapter(incompatible, checkpoint)
 
 
 def test_inference_requires_source_age_and_same_prompt_responds_to_delta():

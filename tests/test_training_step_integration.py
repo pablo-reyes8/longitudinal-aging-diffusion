@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from src.model import encode_images_to_latents
+from src.model import encode_images_to_latents, encode_prompts
 from src.training import run_training_step, train_one_epoch, validate_one_epoch
 from training_fakes import clone_module_parameters, make_training_bundle, make_training_loss
 
@@ -62,6 +62,22 @@ def test_identity_excludes_image_dropped_samples_but_age_keeps_all():
     assert output["metrics"]["age_count"] == 4
     assert output["identity_indices"].tolist() == [0, 3]
     assert output["auxiliary_indices"].tolist() == [0, 1, 2, 3]
+
+
+def test_per_sample_mixed_prompt_is_the_text_sent_to_encoder():
+    bundle = make_training_bundle()
+    loss_fn = make_training_loss(bundle, auxiliaries=False)
+    batch = synthetic_batch(3)
+    result = run_training_step(
+        bundle=bundle, loss_fn=loss_fn, batch=batch, device=torch.device("cpu"),
+        amp_enabled=False, conditioning_dropout_prob=0,
+        target_prompt_policy="mixed", generic_prompt_prob=0.30, numeric_prompt_prob=0.70,
+        prompt_policy_random_values=torch.tensor([0.10, 0.50, 0.20]),
+        sample_target_posterior=False, return_debug_tensors=True,
+    )
+    expected_prompts = [batch["generic_prompt"][0], batch["target_prompt"][1], batch["generic_prompt"][2]]
+    assert result["prompt_selection"]["prompts"] == expected_prompts
+    assert torch.equal(result["debug"]["conditioned_text"], encode_prompts(bundle, expected_prompts))
 
 
 def test_cpu_bf16_smoke_backward_keeps_objective_and_gradients_finite():

@@ -137,6 +137,31 @@ def test_delta_override_preserves_default_and_changes_only_effective_condition()
     assert not torch.equal(normal["image_tensor"], text_only["image_tensor"])
 
 
+def test_direct_referenced_cfg_modes_are_active_and_inverse_remains_legacy():
+    bundle = make_training_bundle(seed=119)
+    common = inference_kwargs(bundle, source_age=26, target_age=65, seed=2026, num_inference_steps=3)
+    source_ref = infer_face_aging_direct(
+        **common, text_reference_mode="source_age", age_guidance_scale=3.0,
+    )
+    generic_ref = infer_face_aging_direct(
+        **common, text_reference_mode="generic", age_guidance_scale=3.0,
+    )
+    null_ref = infer_face_aging_direct(
+        **common, text_reference_mode="null", age_guidance_scale=7.0,
+    )
+    assert source_ref["reference_prompt"] == source_ref["source_prompt"]
+    assert generic_ref["reference_prompt"] == "photo of a person"
+    assert null_ref["reference_prompt"] == ""
+    assert not torch.equal(source_ref["image_tensor"], generic_ref["image_tensor"])
+    assert not torch.equal(source_ref["image_tensor"], null_ref["image_tensor"])
+    inverse = infer_face_aging_inverse(
+        **common, text_reference_mode="source_age", age_guidance_scale=3.0,
+    )
+    assert inverse["requested_text_reference_mode"] == "source_age"
+    assert inverse["text_reference_mode"] == "null"
+    assert inverse["age_guidance_scale"] == inverse["text_guidance_scale"]
+
+
 def test_comparison_grid_and_age_sweep_order(tmp_path):
     bundle = make_training_bundle()
     comparison = compare_inference_modes(

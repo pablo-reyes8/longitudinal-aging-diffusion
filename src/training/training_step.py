@@ -20,6 +20,7 @@ from .conditioning_dropout import (
     sample_conditioning_dropout,
 )
 from .mixed_precision import autocast_ctx
+from .prompt_regularization import select_training_prompts
 from .timestep_sampling import sample_diffusion_timesteps, timestep_statistics
 
 
@@ -107,6 +108,10 @@ def run_training_step(
     device: torch.device,
     prompts: Sequence[str] | None = None,
     prompt_key: str = "target_prompt",
+    target_prompt_policy: str = "numeric",
+    generic_prompt_prob: float = 0.0,
+    numeric_prompt_prob: float = 1.0,
+    prompt_policy_random_values: torch.Tensor | None = None,
     prepared: dict[str, Any] | None = None,
     amp_enabled: bool = True,
     amp_dtype: str | torch.dtype = "auto",
@@ -138,7 +143,28 @@ def run_training_step(
             timesteps=timesteps, noise=noise,
             dropout_random_values=dropout_random_values,
         )
-    selected_prompts = list(prompts if prompts is not None else batch[prompt_key])
+    if prompts is None and prompt_key == "target_prompt":
+        prompt_selection = select_training_prompts(
+            batch,
+            target_prompt_policy=target_prompt_policy,
+            generic_prompt_prob=generic_prompt_prob,
+            numeric_prompt_prob=numeric_prompt_prob,
+            generator=generator,
+            random_values=prompt_policy_random_values,
+        )
+        selected_prompts = prompt_selection["prompts"]
+    else:
+        selected_prompts = list(prompts if prompts is not None else batch[prompt_key])
+        prompt_selection = {
+            "prompts": selected_prompts,
+            "generic_mask": None,
+            "numeric_mask": None,
+            "generic_count": 0,
+            "numeric_count": 0,
+            "generic_fraction": 0.0,
+            "numeric_fraction": 0.0,
+            "policy": "explicit",
+        }
     if len(selected_prompts) != prepared["target_latents"].shape[0]:
         raise ValueError("Prompt count does not equal batch size")
     with torch.no_grad():
@@ -158,6 +184,8 @@ def run_training_step(
         bundle,
         batch.get("delta_age"),
         batch_size=prepared["target_latents"].shape[0],
+        source_age=batch.get("source_age"),
+        target_age=batch.get("target_age"),
     )
     unet_kwargs = {
         "encoder_hidden_states": conditioned_text,
@@ -202,7 +230,16 @@ def run_training_step(
         "target_age_mean": float(batch["target_age"].float().mean()),
         "delta_age_mean": float(batch["delta_age"].float().mean()),
     }
-    result = {"loss_out": loss_out, "prepared": prepared, "diagnostics": diagnostics}
+    age_conditioner = bundle.get("age_conditioner")
+    age_scale = getattr(age_conditioner, "age_scale", None)
+    if age_scale is not None:
+        diagnostics["age_conditioner_scale"] = float(age_scale.detach())
+    result = {
+        "loss_out": loss_out,
+        "prepared": prepared,
+        "diagnostics": diagnostics,
+        "prompt_selection": prompt_selection,
+    }
     if return_debug_tensors:
         result["debug"] = {
             "model_input": model_input,

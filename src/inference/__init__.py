@@ -1,6 +1,11 @@
 """Public face-aging inference API."""
 
-from .cfg_guidance import combine_three_way_cfg, predict_three_way_cfg
+from .cfg_guidance import (
+    combine_referenced_text_cfg,
+    combine_referenced_three_way_cfg,
+    combine_three_way_cfg,
+    predict_three_way_cfg,
+)
 from .checkpoint_loading import (
     load_face_aging_adapter_for_inference,
     load_face_aging_inference_bundle,

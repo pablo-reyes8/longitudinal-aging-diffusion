@@ -92,8 +92,8 @@ def test_bundle_trainable_policy_and_optimizer_groups(adapter_type):
     names = bundle["trainable_param_names"]
     assert any(name.startswith("conv_in.") for name in names)
     assert all(
-        name.startswith("conv_in.") or ".lora_" in name or name.endswith(".magnitude")
-        or name.startswith("age_delta_conditioner.")
+            name.startswith("conv_in.") or ".lora_" in name or name.endswith(".magnitude")
+            or name.startswith("age_delta_conditioner.") or name.startswith("age_conditioner.")
         for name in names
     )
     assert all(p.dtype == torch.float32 for p in bundle["trainable_params"])

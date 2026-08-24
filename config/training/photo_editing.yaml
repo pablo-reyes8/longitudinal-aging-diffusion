@@ -9,6 +9,8 @@ conv_in_weight_decay: 1.0e-2
 age_conditioner_weight_decay: 1.0e-2
 use_age_delta_conditioning: true
 age_conditioning_mode: delta_mlp
+use_age_conditioner_v2: true
+age_conditioning_version: v2_fourier
 age_delta_scale: 80.0
 use_relative_age_loss: true
 relative_age_weight: 0.05
@@ -22,6 +24,9 @@ amp_dtype: auto
 gradient_checkpointing: true
 enable_xformers: true
 conditioning_dropout_prob: 0.05
+target_prompt_policy: mixed
+generic_prompt_prob: 0.30
+numeric_prompt_prob: 0.70
 timestep_sampling: uniform
 min_train_timestep: 0
 max_train_timestep: null
@@ -46,6 +51,8 @@ monitoring_source_age: null  # required when monitoring_image is supplied
 monitoring_use_inverse_diffusion: false
 monitoring_num_inference_steps: 30
 monitoring_strength: 0.35
+monitoring_text_reference_mode: source_age
+monitoring_age_guidance_scale: 3.0
 monitoring_seed: 2026
 log_every: 25
 seed: 42

@@ -42,11 +42,13 @@ def _direct_latent_edit(
     bundle,
     source_latents: torch.Tensor,
     target_prompt: str,
+    reference_prompt: str,
     negative_prompt: str,
     scheduler,
     num_inference_steps: int,
     strength: float,
     text_guidance_scale: float,
+    age_guidance_scale: float,
     image_guidance_scale: float,
     use_cfg: bool,
     generator,
@@ -65,6 +67,9 @@ def _direct_latent_edit(
     latents = scheduler.add_noise(source_latents, noise, repeated_timestep)
     initial_latents = latents.detach().cpu().clone()
     embeddings = encode_prompts(bundle, [target_prompt] * source_latents.shape[0], device=source_latents.device)
+    reference_embeddings = encode_prompts(
+        bundle, [reference_prompt] * source_latents.shape[0], device=source_latents.device
+    )
     null_embeddings = encode_prompts(bundle, [negative_prompt], device=source_latents.device)
     trajectory = [initial_latents] if return_intermediates else None
     guided_norms = []
@@ -77,7 +82,9 @@ def _direct_latent_edit(
             source_latents=source_latents,
             full_text_embeddings=embeddings,
             null_text_embeddings=null_embeddings,
+            reference_text_embeddings=reference_embeddings,
             text_guidance_scale=text_guidance_scale,
+            age_guidance_scale=age_guidance_scale,
             image_guidance_scale=image_guidance_scale,
             use_cfg=use_cfg,
             age_conditioning=age_conditioning,
@@ -125,6 +132,8 @@ def infer_face_aging(
     strength: float = 0.35,
     inversion_strength: float = 1.0,
     text_guidance_scale: float = 7.0,
+    text_reference_mode: str = "source_age",
+    age_guidance_scale: float = 3.0,
     image_guidance_scale: float = 1.5,
     negative_prompt: str = "",
     prompt_style: str = "selfage",
@@ -148,10 +157,26 @@ def infer_face_aging(
         mode = "inverse" if use_inverse_diffusion else "direct"
     if mode not in {"direct", "inverse"}:
         raise ValueError("mode must be 'direct' or 'inverse'")
+    if text_reference_mode not in {"null", "generic", "source_age"}:
+        raise ValueError("text_reference_mode must be 'null', 'generic', or 'source_age'")
+    if age_guidance_scale < 0:
+        raise ValueError("age_guidance_scale must be non-negative")
     prompt_pack = build_inference_prompt_pack(
         target_prompt=target_prompt, target_age=target_age,
         source_prompt=source_prompt, source_age=source_age,
         prompt_style=prompt_style, negative_prompt=negative_prompt,
+    )
+    # Milestone 09 deliberately changes only direct editing. Inverse diffusion
+    # remains on the legacy null-referenced guidance path.
+    resolved_text_reference_mode = text_reference_mode if mode == "direct" else "null"
+    if resolved_text_reference_mode == "source_age":
+        reference_prompt = prompt_pack["source_prompt"]
+    elif resolved_text_reference_mode == "generic":
+        reference_prompt = prompt_pack["generic_prompt"]
+    else:
+        reference_prompt = negative_prompt
+    resolved_age_guidance_scale = (
+        float(age_guidance_scale) if mode == "direct" else float(text_guidance_scale)
     )
     model_device, _ = module_device_dtype(bundle["unet"])
     resolved_device = torch.device(device) if device is not None else model_device
@@ -185,15 +210,28 @@ def infer_face_aging(
             if override_delta_age is None
             else float(override_delta_age)
         )
+        effective_target_age_value = float(prompt_pack["source_age"]) + delta_value
         edit_age_conditioning = compute_age_delta_embedding(
             bundle,
             torch.full((source_latents.shape[0],), delta_value, device=resolved_device),
             batch_size=source_latents.shape[0],
+            source_age=torch.full(
+                (source_latents.shape[0],), float(prompt_pack["source_age"]), device=resolved_device
+            ),
+            target_age=torch.full(
+                (source_latents.shape[0],), effective_target_age_value, device=resolved_device
+            ),
         )
         source_age_conditioning = compute_age_delta_embedding(
             bundle,
             torch.zeros(source_latents.shape[0], device=resolved_device),
             batch_size=source_latents.shape[0],
+            source_age=torch.full(
+                (source_latents.shape[0],), float(prompt_pack["source_age"]), device=resolved_device
+            ),
+            target_age=torch.full(
+                (source_latents.shape[0],), float(prompt_pack["source_age"]), device=resolved_device
+            ),
         )
     else:
         true_delta_value = (
@@ -202,6 +240,7 @@ def infer_face_aging(
             else None
         )
         delta_value = None
+        effective_target_age_value = None
         edit_age_conditioning = source_age_conditioning = None
     scheduler = create_inference_scheduler(bundle)
     actual_generator = make_generator(resolved_device, seed, generator)
@@ -217,10 +256,13 @@ def infer_face_aging(
         if mode == "direct":
             edit = _direct_latent_edit(
                 bundle=bundle, source_latents=source_latents,
-                target_prompt=prompt_pack["target_prompt"], negative_prompt=negative_prompt,
+                target_prompt=prompt_pack["target_prompt"],
+                reference_prompt=reference_prompt,
+                negative_prompt=negative_prompt,
                 scheduler=scheduler, num_inference_steps=num_inference_steps,
                 strength=strength,
                 text_guidance_scale=text_guidance_scale,
+                age_guidance_scale=resolved_age_guidance_scale,
                 image_guidance_scale=image_guidance_scale,
                 use_cfg=use_cfg, generator=actual_generator,
                 age_conditioning=edit_age_conditioning,
@@ -282,6 +324,10 @@ def infer_face_aging(
         "strength": strength if mode == "direct" else None,
         "inversion_strength": inversion_strength if mode == "inverse" else None,
         "text_guidance_scale": text_guidance_scale,
+        "text_reference_mode": resolved_text_reference_mode,
+        "requested_text_reference_mode": text_reference_mode,
+        "reference_prompt": reference_prompt,
+        "age_guidance_scale": resolved_age_guidance_scale,
         "image_guidance_scale": image_guidance_scale,
         "seed": int(seed),
         "diagnostics": diagnostics,
@@ -294,6 +340,7 @@ def infer_face_aging(
             "use_age_delta_conditioning": resolved_age_conditioning,
             "delta_age": delta_value,
             "true_delta_age": true_delta_value,
+            "effective_target_age": effective_target_age_value,
             "override_delta_age": override_delta_age,
             "start_timestep": edit.get("start_timestep", inversion.get("start_timestep") if inversion else None),
         },

@@ -15,7 +15,13 @@ PROTECTED_KEYS = (
     "source_conditioning", "unet_in_channels", "unet_cross_attention_dim",
     "use_age_delta_conditioning", "age_conditioning_mode", "age_delta_scale",
     "age_condition_hidden_dim", "age_condition_output_dim",
+    "use_age_conditioner_v2", "age_conditioning_version", "num_fourier_frequencies",
+    "age_condition_use_raw_scalars", "age_condition_use_gate",
 )
+V2_ONLY_KEYS = {
+    "use_age_conditioner_v2", "age_conditioning_version", "num_fourier_frequencies",
+    "age_condition_use_raw_scalars", "age_condition_use_gate",
+}
 
 
 def _checkpoint_config(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -40,7 +46,9 @@ def load_face_aging_adapter_for_inference(
     current_config = dict(bundle.get("config", {}))
     mismatches = {
         key: {"checkpoint": saved_config.get(key), "bundle": current_config.get(key)}
-        for key in PROTECTED_KEYS if saved_config.get(key) != current_config.get(key)
+        for key in PROTECTED_KEYS
+        if (key not in V2_ONLY_KEYS or key in saved_config)
+        and saved_config.get(key) != current_config.get(key)
     }
     if strict_config and mismatches:
         raise ValueError(f"Inference checkpoint is incompatible with bundle: {mismatches}")
@@ -95,9 +103,17 @@ def load_face_aging_inference_bundle(
         source_conditioning=config.get("source_conditioning", "concat"),
         use_age_delta_conditioning=config.get("use_age_delta_conditioning", False),
         age_conditioning_mode=config.get("age_conditioning_mode", "delta_mlp"),
+        use_age_conditioner_v2=config.get(
+            "use_age_conditioner_v2",
+            config.get("age_conditioning_version") == "v2_fourier",
+        ),
+        age_conditioning_version=config.get("age_conditioning_version", "v1_delta"),
         age_delta_scale=config.get("age_delta_scale", 80.0),
         age_condition_hidden_dim=config.get("age_condition_hidden_dim", 128),
         age_condition_output_dim=config.get("age_condition_output_dim"),
+        num_fourier_frequencies=config.get("num_fourier_frequencies", 8),
+        age_condition_use_raw_scalars=config.get("age_condition_use_raw_scalars", True),
+        age_condition_use_gate=config.get("age_condition_use_gate", True),
         device=device, dtype=dtype,
         local_files_only=local_files_only, token=token,
         **model_loading_kwargs,

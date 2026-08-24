@@ -19,6 +19,7 @@ from .mixed_precision import (
     safe_optimizer_step,
     setup_device_and_precision,
 )
+from .prompt_regularization import select_training_prompts, validate_prompt_policy
 from .scheduler_warmup import WarmupCosineLR, compute_warmup_steps, estimate_optimizer_steps
 from .seed import set_seed
 from .timestep_sampling import deterministic_validation_timesteps, sample_diffusion_timesteps

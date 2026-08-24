@@ -6,6 +6,8 @@ import pytest
 import torch
 
 from src.inference import (
+    combine_referenced_text_cfg,
+    combine_referenced_three_way_cfg,
     combine_three_way_cfg,
     create_inference_scheduler,
     ddim_forward_step,
@@ -30,6 +32,34 @@ def test_guidance_formula_and_three_critical_scale_sanities():
     assert torch.equal(combine_three_way_cfg(full, image, uncond, text_guidance_scale=1, image_guidance_scale=1), full)
 
 
+def test_referenced_cfg_critical_invariants_and_legacy_equivalence():
+    target = torch.tensor([[[[5.0]]]])
+    reference = torch.tensor([[[[2.0]]]])
+    reference_no_image = torch.tensor([[[[-1.0]]]])
+    assert torch.equal(
+        combine_referenced_text_cfg(target, reference, age_guidance_scale=0), reference
+    )
+    assert torch.equal(
+        combine_referenced_text_cfg(reference, reference, age_guidance_scale=9), reference
+    )
+    observed = combine_referenced_three_way_cfg(
+        target, reference, reference_no_image,
+        age_guidance_scale=3, image_guidance_scale=1.5,
+    )
+    oracle = reference + 3 * (target - reference) + 0.5 * (reference - reference_no_image)
+    assert torch.equal(observed, oracle)
+    assert torch.equal(
+        combine_referenced_three_way_cfg(
+            target, reference, reference_no_image,
+            age_guidance_scale=7, image_guidance_scale=1.5,
+        ),
+        combine_three_way_cfg(
+            target, reference, reference_no_image,
+            text_guidance_scale=7, image_guidance_scale=1.5,
+        ),
+    )
+
+
 def test_batched_cfg_branches_match_three_slow_independent_forwards():
     bundle = make_training_bundle()
     bundle["unet"].eval()
@@ -50,6 +80,35 @@ def test_batched_cfg_branches_match_three_slow_independent_forwards():
     assert torch.allclose(branches["uncond"], slow_uncond, atol=2e-7)
     oracle = combine_three_way_cfg(slow_full, slow_image, slow_uncond)
     assert torch.allclose(guided, oracle, atol=5e-7)
+
+
+def test_referenced_cfg_uses_supplied_reference_embedding_and_changes_prediction():
+    bundle = make_training_bundle(seed=512)
+    bundle["unet"].eval()
+    target, source = torch.randn(2, 4, 4, 4), torch.randn(2, 4, 4, 4)
+    target_embeddings = encode_prompts(bundle, ["age 40", "age 70"])
+    source_reference = encode_prompts(bundle, ["age 26", "age 26"])
+    generic_reference = encode_prompts(bundle, ["photo of a person", "photo of a person"])
+    null = encode_prompts(bundle, [""])
+    source_guided, branches = predict_three_way_cfg(
+        bundle=bundle, target_latents=target, timestep=torch.tensor(30),
+        source_latents=source, full_text_embeddings=target_embeddings,
+        reference_text_embeddings=source_reference, null_text_embeddings=null,
+        age_guidance_scale=3.0, return_branches=True,
+    )
+    generic_guided = predict_three_way_cfg(
+        bundle=bundle, target_latents=target, timestep=torch.tensor(30),
+        source_latents=source, full_text_embeddings=target_embeddings,
+        reference_text_embeddings=generic_reference, null_text_embeddings=null,
+        age_guidance_scale=3.0,
+    )
+    slow_reference = bundle["unet"](
+        build_conditioned_unet_input(target, source), torch.tensor(30),
+        encoder_hidden_states=source_reference, return_dict=True,
+    ).sample
+    assert torch.allclose(branches["reference"], slow_reference, atol=2e-7)
+    assert source_guided.shape == target.shape and torch.isfinite(source_guided).all()
+    assert not torch.equal(source_guided, generic_guided)
 
 
 def test_cfg_uses_exactly_one_unet_forward_with_three_times_the_batch():

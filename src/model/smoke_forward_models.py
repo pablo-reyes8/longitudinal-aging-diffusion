@@ -35,6 +35,8 @@ def prepare_face_aging_forward(
     timesteps: torch.Tensor | None = None,
     generator: torch.Generator | None = None,
     delta_ages: torch.Tensor | None = None,
+    source_ages: torch.Tensor | None = None,
+    target_ages: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     """Prepare and execute one denoising prediction, without defining a loss."""
     latents = prepare_source_target_latents(bundle, source_images, target_images)
@@ -61,7 +63,8 @@ def prepare_face_aging_forward(
     timesteps = timesteps.to(unet_device)
     hidden_states = hidden_states.to(unet_device)
     age_conditioning = compute_age_delta_embedding(
-        bundle, delta_ages, batch_size=conditioned_input.shape[0]
+        bundle, delta_ages, batch_size=conditioned_input.shape[0],
+        source_age=source_ages, target_age=target_ages,
     ) if delta_ages is not None else None
     unet_kwargs = {"encoder_hidden_states": hidden_states, "return_dict": True}
     if age_conditioning is not None:
@@ -189,6 +192,8 @@ def run_face_aging_model_validation(
         prepared = prepare_face_aging_forward(
             bundle, batch["source_image"], batch["target_image"], prompts,
             delta_ages=batch.get("delta_age"),
+            source_ages=batch.get("source_age"),
+            target_ages=batch.get("target_age"),
         )
         source, target = prepared["source_latents"], prepared["target_latents"]
         latent_report = {
@@ -232,7 +237,10 @@ def run_face_aging_model_validation(
         prepared["noise_pred"].float().square().mean().backward()
         adapter_named = [(name, p) for name, p in unet_trainable if not name.startswith("conv_in.")]
         conv_named = [(name, p) for name, p in unet_trainable if name.startswith("conv_in.")]
-        age_named = [(name, p) for name, p in trainable if name.startswith("age_delta_conditioner.")]
+        age_named = [
+            (name, p) for name, p in trainable
+            if name.startswith("age_delta_conditioner.") or name.startswith("age_conditioner.")
+        ]
         frozen_named = [(name, p) for name, p in unet.named_parameters() if not p.requires_grad]
         gradient_report = {
             "adapter": _gradient_summary(adapter_named),

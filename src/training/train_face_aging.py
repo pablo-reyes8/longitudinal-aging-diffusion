@@ -20,6 +20,7 @@ from .checkpoints import (
     load_training_checkpoint,
 )
 from .mixed_precision import ensure_trainable_parameters_fp32, setup_device_and_precision
+from .prompt_regularization import validate_prompt_policy
 from .sampling_monitor import normalize_monitoring_ages, run_face_aging_monitor, sample_monitoring_images
 from .scheduler_warmup import WarmupCosineLR, compute_warmup_steps, estimate_optimizer_steps
 from .seed import set_seed
@@ -121,6 +122,8 @@ def train_model(
     use_age_delta_conditioning: bool | None = None,
     age_conditioning_mode: str = "delta_mlp",
     age_delta_scale: float = 80.0,
+    use_age_conditioner_v2: bool | None = None,
+    age_conditioning_version: str | None = None,
     use_relative_age_loss: bool | None = None,
     relative_age_weight: float | None = None,
     relative_age_loss_type: str | None = None,
@@ -134,6 +137,9 @@ def train_model(
     gradient_checkpointing: bool = True,
     enable_xformers: bool = True,
     conditioning_dropout_prob: float = 0.05,
+    target_prompt_policy: str = "mixed",
+    generic_prompt_prob: float = 0.30,
+    numeric_prompt_prob: float = 0.70,
     identity_loss_on_image_dropped_samples: bool = False,
     timestep_sampling: str = "uniform",
     min_train_timestep: int = 0,
@@ -171,6 +177,8 @@ def train_model(
     monitoring_num_inference_steps: int = 30,
     monitoring_strength: float = 0.35,
     monitoring_text_guidance_scale: float = 7.0,
+    monitoring_text_reference_mode: str = "source_age",
+    monitoring_age_guidance_scale: float = 3.0,
     monitoring_image_guidance_scale: float = 1.5,
     monitoring_seed: int = 2026,
     monitoring_compute_diagnostics: bool = True,
@@ -194,6 +202,7 @@ def train_model(
     )
     if validate_every_epochs <= 0 or save_every_epochs <= 0:
         raise ValueError("validation/save epoch intervals must be positive")
+    validate_prompt_policy(target_prompt_policy, generic_prompt_prob, numeric_prompt_prob)
     if monitoring_image is not None and checkpoint_dir is None and monitoring_dir is None:
         raise ValueError("Built-in monitoring requires monitoring_dir or checkpoint_dir")
     if monitoring_image is not None and monitoring_target_prompt is None and monitoring_target_age is None:
@@ -222,6 +231,14 @@ def train_model(
             raise ValueError("age_conditioning_mode does not match the bundle")
         if not math.isclose(float(age_delta_scale), float(bundle.get("age_delta_scale"))):
             raise ValueError("age_delta_scale does not match the bundle")
+        requested_v2 = (
+            bool(bundle.get("use_age_conditioner_v2", False))
+            if use_age_conditioner_v2 is None else bool(use_age_conditioner_v2)
+        )
+        if requested_v2 != bool(bundle.get("use_age_conditioner_v2", False)):
+            raise ValueError("use_age_conditioner_v2 must match the constructed bundle")
+        if age_conditioning_version is not None and age_conditioning_version != bundle.get("age_conditioning_version"):
+            raise ValueError("age_conditioning_version does not match the constructed bundle")
         if monitoring_image is not None and monitoring_source_age is None:
             raise ValueError(
                 "monitoring_source_age is required when the bundle uses age-delta conditioning"
@@ -288,6 +305,8 @@ def train_model(
         "age_conditioner_weight_decay": age_conditioner_weight_decay,
         "use_age_delta_conditioning": requested_age_enabled,
         "age_conditioning_mode": bundle.get("age_conditioning_mode"),
+        "use_age_conditioner_v2": bundle.get("use_age_conditioner_v2"),
+        "age_conditioning_version": bundle.get("age_conditioning_version"),
         "age_delta_scale": bundle.get("age_delta_scale"),
         "use_relative_age_loss": loss_fn.use_relative_age_loss,
         "relative_age_weight": loss_fn.relative_age_weight,
@@ -295,6 +314,9 @@ def train_model(
         "warmup_ratio": warmup_ratio, "warmup_steps": warmup_steps, "min_lr_ratio": min_lr_ratio,
         "max_grad_norm": max_grad_norm,
         "conditioning_dropout_prob": conditioning_dropout_prob,
+        "target_prompt_policy": target_prompt_policy,
+        "generic_prompt_prob": generic_prompt_prob,
+        "numeric_prompt_prob": numeric_prompt_prob,
         "identity_loss_on_image_dropped_samples": identity_loss_on_image_dropped_samples,
         "timestep_sampling": timestep_sampling,
         "min_train_timestep": min_train_timestep,
@@ -311,6 +333,8 @@ def train_model(
         "monitoring_mode": resolved_monitoring_mode,
         "monitoring_num_inference_steps": monitoring_num_inference_steps,
         "monitoring_strength": monitoring_strength,
+        "monitoring_text_reference_mode": monitoring_text_reference_mode,
+        "monitoring_age_guidance_scale": monitoring_age_guidance_scale,
         "monitoring_seed": monitoring_seed,
         "monitoring_target_ages": monitoring_ages,
         "monitoring_compute_diagnostics": bool(monitoring_compute_diagnostics),
@@ -326,7 +350,8 @@ def train_model(
     checkpoint_text = str(root) if root is not None else "disabled"
     monitoring_text = (
         f"every {sample_every_epochs} epoch(s), mode={resolved_monitoring_mode}, "
-        f"strength={monitoring_strength}, ages={monitoring_ages}, seed={monitoring_seed}"
+        f"strength={monitoring_strength}, ages={monitoring_ages}, seed={monitoring_seed}, "
+        f"text_ref={monitoring_text_reference_mode}, age_cfg={monitoring_age_guidance_scale}"
         if monitoring_image is not None else "disabled"
     )
     print("\n" + "=" * 104)
@@ -349,7 +374,7 @@ def train_model(
     print(
         f" Trainable     {trainable_parameters:,} params in {len(trainables)} tensors | "
         f"source_conditioning={bundle.get('source_conditioning')} | "
-        f"delta_conditioning={requested_age_enabled} (scale={bundle.get('age_delta_scale')})"
+        f"age_conditioning={bundle.get('age_conditioning_version')} (scale={bundle.get('age_delta_scale')})"
     )
     print(
         f" Optimization  epochs={epochs_to_run} | steps/epoch={steps_per_epoch} | total_steps={total_planned_steps} | "
@@ -368,6 +393,10 @@ def train_model(
         f" Sampling      timesteps={min_train_timestep}-{timestep_end} ({timestep_sampling}) | "
         f"cond_dropout={conditioning_dropout_prob:.3f} | source_posterior={'sample' if sample_source_posterior else 'mean'} | "
         f"target_posterior={'sample' if sample_target_posterior else 'mean'}"
+    )
+    print(
+        f" Prompt policy {target_prompt_policy} | numeric={numeric_prompt_prob:.2f} | "
+        f"generic={generic_prompt_prob:.2f} | conditioning_dropout={conditioning_dropout_prob:.3f}"
     )
     print(
         f" Aux losses    every={loss_fn.auxiliary_every_n_steps} microbatch(es) | "
@@ -432,6 +461,9 @@ def train_model(
                 scaler=precision["scaler"], amp_enabled=precision["amp_enabled"], amp_dtype=amp_dtype,
                 grad_accum_steps=grad_accum_steps, max_grad_norm=max_grad_norm,
                 conditioning_dropout_prob=conditioning_dropout_prob,
+                target_prompt_policy=target_prompt_policy,
+                generic_prompt_prob=generic_prompt_prob,
+                numeric_prompt_prob=numeric_prompt_prob,
                 timestep_sampling=timestep_sampling,
                 min_train_timestep=min_train_timestep, max_train_timestep=max_train_timestep,
                 double_prompt_prob=double_prompt_prob,
@@ -511,6 +543,8 @@ def train_model(
                     num_inference_steps=monitoring_num_inference_steps,
                     strength=monitoring_strength,
                     text_guidance_scale=monitoring_text_guidance_scale,
+                    text_reference_mode=monitoring_text_reference_mode,
+                    age_guidance_scale=monitoring_age_guidance_scale,
                     image_guidance_scale=monitoring_image_guidance_scale,
                     image_size=image_size,
                     compute_diagnostics=monitoring_compute_diagnostics,

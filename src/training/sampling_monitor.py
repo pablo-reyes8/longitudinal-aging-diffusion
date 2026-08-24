@@ -13,7 +13,7 @@ import torch
 DIAGNOSTIC_CSV_FIELDS = [
     "epoch", "source_age", "target_age", "target_delta_age", "predicted_source_age",
     "predicted_generated_age", "predicted_delta_age", "age_error", "delta_age_error",
-    "identity_cosine", "mode", "seed",
+    "identity_cosine", "mode", "text_reference_mode", "age_guidance_scale", "seed",
 ]
 
 
@@ -33,6 +33,8 @@ def _diagnostic_row(*, epoch: int, result) -> dict | None:
         "delta_age_error": diagnostics["delta_age_error"],
         "identity_cosine": diagnostics["identity_cosine_source_generated"],
         "mode": result["mode"],
+        "text_reference_mode": result["text_reference_mode"],
+        "age_guidance_scale": result["age_guidance_scale"],
         "seed": result["seed"],
     }
 
@@ -76,6 +78,7 @@ def run_face_aging_monitor(
     target_age=None, source_prompt=None, source_age=None,
     mode="direct", use_inverse_diffusion=None, num_inference_steps=30,
     strength=0.35, text_guidance_scale=7.0, image_guidance_scale=1.5,
+    text_reference_mode="source_age", age_guidance_scale=3.0,
     seed=2026, image_size=256, compute_diagnostics: bool = True,
 ):
     """Generate one edit or an ordered age sweep from the same fixed image."""
@@ -103,6 +106,8 @@ def run_face_aging_monitor(
             mode=mode, use_inverse_diffusion=use_inverse_diffusion,
             num_inference_steps=num_inference_steps, strength=strength,
             text_guidance_scale=text_guidance_scale,
+            text_reference_mode=text_reference_mode,
+            age_guidance_scale=age_guidance_scale,
             image_guidance_scale=image_guidance_scale,
             seed=seed, image_size=image_size,
             compute_diagnostics=diagnostics_enabled,
@@ -144,6 +149,8 @@ def run_face_aging_monitor(
         mode=mode, use_inverse_diffusion=use_inverse_diffusion,
         num_inference_steps=num_inference_steps, strength=strength,
         text_guidance_scale=text_guidance_scale,
+        text_reference_mode=text_reference_mode,
+        age_guidance_scale=age_guidance_scale,
         image_guidance_scale=image_guidance_scale,
         seed=seed, image_size=image_size,
         compute_diagnostics=diagnostics_enabled,

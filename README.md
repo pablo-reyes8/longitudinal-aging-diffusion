@@ -3,12 +3,13 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-EE4C2C?logo=pytorch&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Tests](https://img.shields.io/badge/tests-203%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-215%20passed-brightgreen)
 
 Supervised photo aging from real longitudinal observations. The project adapts
-Stable Diffusion 1.5 with source-image conditioning, explicit relative-age
-conditioning, and lightweight LoRA/DoRA attention adapters, while keeping the
-VAE and CLIP text encoder frozen.
+Stable Diffusion 1.5 with source-image conditioning, explicit absolute/relative
+age conditioning, and lightweight LoRA/DoRA attention adapters, while keeping
+the VAE and CLIP text encoder frozen. A Fourier age conditioner and referenced
+CFG prevent the numeric age signal from being eclipsed by the CLIP prompt.
 
 > Status: research pipeline. Data loading, model adaptation, numerical loss,
 > mixed-precision training, checkpointing, direct inference, and deterministic
@@ -22,9 +23,10 @@ This gives the model a direct aging target while identity-disjoint splits preven
 the same person from appearing in training and evaluation.
 
 ```text
-source photograph + target-age prompt + (target age - source age)
+source photograph + regularized target-age prompt
                           │
-           VAE / CLIP / age-delta MLP
+       VAE / CLIP / Fourier age conditioner V2
+         (source age, target age, signed delta)
                           │
        source latent + noisy target latent
                           │
@@ -127,10 +129,13 @@ aging-train \
 ```
 
 The baseline uses conservative photo-editing hyperparameters: LoRA `3e-5`,
-expanded input convolution `5e-6`, age-delta MLP `1e-4`, Min-SNR 5, 5%
+expanded input convolution `5e-6`, age conditioner `1e-4`, Min-SNR 5, 5%
 conditioning dropout, a fixed monitoring seed, direct monitoring at strength
 `0.35`, and loss weights `identity=0.20`, `absolute_age=0.05`,
-`relative_age=0.05`. It loads frozen
+`relative_age=0.05`. Age Conditioner V2 encodes source age, target age, and
+signed delta with eight Fourier frequency bands, a 256-unit hidden layer, and
+a trainable output gate initialized to `1.0`. Training independently mixes 70%
+numeric target-age prompts with 30% generic aging prompts. It loads frozen
 `py-feat/arcface_r50` and `iitolstykh/mivolo_v2` auxiliaries. To control VRAM,
 their losses run every fourth training microbatch on 25% of eligible samples and use
 activation checkpointing through the VAE and auxiliary networks. See
@@ -142,7 +147,10 @@ Training monitoring accepts either one age or an ordered sweep. With
 `monitoring_target_age=[30, 35, 40, 50, 65]`, every sampled epoch writes
 `age_030.png`, `age_035.png`, `age_040.png`, `age_050.png`, `age_065.png`, and
 `age_sweep.png` below `monitoring/epoch_NNN/`. The source image, seed, mode, and
-guidance settings remain fixed across ages and epochs.
+guidance settings remain fixed across ages and epochs. Direct monitoring uses
+the source-age prompt as the referenced-CFG baseline with
+`age_guidance_scale=3.0`; selecting `text_reference_mode="null"` reproduces the
+legacy CFG equation exactly.
 When ArcFace and MiVOLO are attached, monitoring also annotates the grid with
 target age, predicted age, and source/generated identity cosine. Each epoch
 writes `sampling_diagnostics_epoch_NNN.csv`, while
@@ -164,7 +172,7 @@ aging-infer \
   --image /server/input/person.jpg \
   --source-age 26 \
   --target-age 65 \
-  --mode inverse \
+  --mode direct \
   --output /server/outputs/person_age_65.png
 ```
 
@@ -180,8 +188,12 @@ aging-infer \
   --output aged.png
 ```
 
-New relative-age checkpoints require both source and target ages at inference;
-the numerical condition is their signed difference. Inference accepts both lightweight adapter checkpoints and full training-resume
+New V2 checkpoints require both source and target ages at inference; their
+numerical condition includes both absolute ages and the signed difference.
+Direct inference defaults to source-age referenced CFG (`age_guidance_scale=3`),
+while `text_reference_mode="null"` remains an exact legacy-CFG compatibility
+mode. Inverse diffusion deliberately keeps the legacy null-reference behavior.
+Inference accepts both lightweight adapter checkpoints and full training-resume
 checkpoints; optimizer, loader, and GradScaler state are not needed.
 `diagnose_checkpoint_age_sweep` loads either checkpoint format and returns a
 pandas DataFrame with predicted age, signed age error, and identity cosine while
@@ -204,7 +216,9 @@ result = infer_face_aging(
     image="person.jpg",
     source_age=26,
     target_age=65,
-    use_inverse_diffusion=True,
+    use_inverse_diffusion=False,
+    text_reference_mode="source_age",
+    age_guidance_scale=3.0,
     seed=42,
 )
 ```

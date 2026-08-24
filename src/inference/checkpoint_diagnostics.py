@@ -18,7 +18,8 @@ DIAGNOSTIC_COLUMNS = [
     "checkpoint", "source_age", "target_age", "target_delta_age",
     "predicted_source_age", "predicted_generated_age", "predicted_delta_age",
     "age_error", "delta_age_error", "identity_cosine", "mode", "strength",
-    "num_inference_steps", "text_guidance_scale", "image_guidance_scale", "seed",
+    "num_inference_steps", "text_guidance_scale", "text_reference_mode",
+    "age_guidance_scale", "image_guidance_scale", "seed",
 ]
 
 
@@ -83,6 +84,8 @@ def diagnose_checkpoint_age_sweep(
     strength: float = 0.35,
     inversion_strength: float = 1.0,
     text_guidance_scale: float = 7.0,
+    text_reference_mode: str = "source_age",
+    age_guidance_scale: float = 3.0,
     image_guidance_scale: float = 1.5,
     negative_prompt: str = "",
     prompt_style: str = "selfage",
@@ -114,6 +117,8 @@ def diagnose_checkpoint_age_sweep(
             strength=strength,
             inversion_strength=inversion_strength,
             text_guidance_scale=text_guidance_scale,
+            text_reference_mode=text_reference_mode,
+            age_guidance_scale=age_guidance_scale,
             image_guidance_scale=image_guidance_scale,
             negative_prompt=negative_prompt,
             prompt_style=prompt_style,
@@ -156,6 +161,8 @@ def diagnose_checkpoint_age_sweep(
             "strength": float(strength),
             "num_inference_steps": int(num_inference_steps),
             "text_guidance_scale": float(text_guidance_scale),
+            "text_reference_mode": result["text_reference_mode"],
+            "age_guidance_scale": result["age_guidance_scale"],
             "image_guidance_scale": float(image_guidance_scale),
             "seed": int(seed),
         })

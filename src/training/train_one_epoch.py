@@ -136,6 +136,9 @@ def train_one_epoch(
     grad_accum_steps: int = 4,
     max_grad_norm: float = 1.0,
     conditioning_dropout_prob: float = 0.05,
+    target_prompt_policy: str = "mixed",
+    generic_prompt_prob: float = 0.30,
+    numeric_prompt_prob: float = 0.70,
     timestep_sampling: str = "uniform",
     min_train_timestep: int = 0,
     max_train_timestep: int | None = None,
@@ -171,13 +174,14 @@ def train_one_epoch(
     total_batches = len(train_loader) if max_batches is None else min(len(train_loader), int(max_batches))
     iterator = iter(train_loader)
     processed_batches = processed_samples = skipped_nonfinite = skipped_updates = double_prompt_batches = 0
+    numeric_prompt_count = generic_prompt_count = 0
     consecutive_nonfinite = 0
     start = time.perf_counter()
     if log_every:
         print(f" Epoch {epoch + 1:02d} - training progress")
         print(
             "   batch       done    opt.step   total     diffusion  identity  age.abs  age.rel  "
-            "grad     LoRA lr    samples/s   ETA"
+            "generic  age.gate  grad     LoRA lr    samples/s   ETA"
         )
     while processed_batches < total_batches:
         if max_optimizer_steps is not None and optimizer_step >= max_optimizer_steps:
@@ -202,6 +206,9 @@ def train_one_epoch(
                 bundle=bundle, loss_fn=loss_fn, batch=batch, device=device,
                 amp_enabled=amp_enabled, amp_dtype=amp_dtype,
                 conditioning_dropout_prob=conditioning_dropout_prob,
+                target_prompt_policy=target_prompt_policy,
+                generic_prompt_prob=generic_prompt_prob,
+                numeric_prompt_prob=numeric_prompt_prob,
                 timestep_sampling=timestep_sampling,
                 min_train_timestep=min_train_timestep, max_train_timestep=max_train_timestep,
                 sample_source_posterior=sample_source_posterior,
@@ -211,6 +218,14 @@ def train_one_epoch(
                 generator=generator, global_step=global_step,
             )
             first_out = first["loss_out"]
+            prompt_selection = first.get("prompt_selection", {
+                "numeric_count": batch_samples,
+                "generic_count": 0,
+                "numeric_fraction": 1.0,
+                "generic_fraction": 0.0,
+            })
+            numeric_prompt_count += prompt_selection["numeric_count"]
+            generic_prompt_count += prompt_selection["generic_count"]
             if not torch.isfinite(first_out["loss"]):
                 window_failed = True
             else:
@@ -236,6 +251,10 @@ def train_one_epoch(
                 component_values = _component_values(first_out, second_out, first_weight, second_weight)
                 tracker.update(component_values, weight=batch_samples)
                 tracker.update(first["diagnostics"], weight=batch_samples)
+                tracker.update({
+                    "numeric_prompt_fraction": prompt_selection["numeric_fraction"],
+                    "generic_prompt_fraction": prompt_selection["generic_fraction"],
+                }, weight=batch_samples)
                 tracker.update({"double_prompt_fraction": float(use_double)}, weight=batch_samples)
                 _update_gap_metrics(tracker, batch, first_out, loss_fn)
                 step_timesteps = first["prepared"]["timesteps"].detach().cpu().double()
@@ -284,6 +303,8 @@ def train_one_epoch(
                 f"{current.get('loss_id', float('nan')):8.4f}  "
                 f"{current.get('loss_age', float('nan')):7.3f}  "
                 f"{current.get('loss_relative_age', float('nan')):7.3f}  "
+                f"{current.get('generic_prompt_fraction', float('nan')):7.1%}  "
+                f"{current.get('age_conditioner_scale', float('nan')):8.3f}  "
                 f"{current.get('grad_norm', float('nan')):7.3f}  "
                 f"{current.get('lr_adapter', float('nan')):9.2e}  "
                 f"{processed_samples / elapsed_now:9.2f}  {_format_eta(eta):>8}"
@@ -304,6 +325,10 @@ def train_one_epoch(
         "train/skipped_nonfinite": float(skipped_nonfinite),
         "train/skipped_optimizer_updates": float(skipped_updates),
         "train/samples_per_second": processed_samples / elapsed if elapsed else 0.0,
+        "train/numeric_prompt_count": float(numeric_prompt_count),
+        "train/generic_prompt_count": float(generic_prompt_count),
+        "train/numeric_prompt_fraction": numeric_prompt_count / max(1, numeric_prompt_count + generic_prompt_count),
+        "train/generic_prompt_fraction": generic_prompt_count / max(1, numeric_prompt_count + generic_prompt_count),
     })
     return {
         "metrics": metrics,
