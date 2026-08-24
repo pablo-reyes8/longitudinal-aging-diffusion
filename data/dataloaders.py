@@ -42,6 +42,8 @@ def build_face_aging_dataloaders(
     dynamic_person_word: bool = False,
     gender_by_person: Mapping[str, str | None] | None = None,
     horizontal_flip_prob: float = 0.0,
+    include_zero_delta_pairs: bool = False,
+    zero_delta_pair_prob: float = 0.20,
     manifest_path: str | Path | None = None,
     split_path: str | Path | None = None,
     use_cached_manifest: bool = True,
@@ -90,6 +92,8 @@ def build_face_aging_dataloaders(
             prompt_style=prompt_style,
             dynamic_person_word=dynamic_person_word,
             horizontal_flip_prob=flip_prob,
+            include_zero_delta_pairs=include_zero_delta_pairs if split == "train" else False,
+            zero_delta_pair_prob=zero_delta_pair_prob,
             seed=seed + split_index,
         )
         datasets[split] = dataset
@@ -128,6 +132,8 @@ def build_face_aging_dataloaders(
             "min_age_gap": min_age_gap,
             "max_age_gap": max_age_gap,
             "prompt_style": prompt_style,
+            "include_zero_delta_pairs": bool(include_zero_delta_pairs),
+            "zero_delta_pair_prob": float(zero_delta_pair_prob),
         },
     })
     return loaders, metadata

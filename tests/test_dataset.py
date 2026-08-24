@@ -116,3 +116,72 @@ def test_source_target_are_distinct_tensors(tmp_path: Path):
     sample = _dataset(tmp_path)[0]
     assert sample["source_path"] != sample["target_path"]
     assert sample["source_image"].data_ptr() != sample["target_image"].data_ptr()
+
+
+def test_zero_delta_pairs_disabled_preserves_forward_only_contract(tmp_path: Path):
+    for age in (20, 30, 40, 50):
+        write_image(tmp_path / "id_a" / f"{age}.png")
+    dataset = _dataset(
+        tmp_path,
+        pair_strategy="random_target",
+        include_zero_delta_pairs=False,
+        zero_delta_pair_prob=1.0,
+    )
+    for epoch in range(20):
+        dataset.set_epoch(epoch)
+        assert all(
+            dataset.pair_for_index(index).delta_age > 0
+            for index in range(len(dataset))
+        )
+
+
+def test_zero_delta_self_pair_contract_and_prompts(tmp_path: Path):
+    for age in (20, 30, 40):
+        write_image(tmp_path / "id_a" / f"{age}.png")
+    dataset = _dataset(
+        tmp_path,
+        pair_strategy="random_target",
+        include_zero_delta_pairs=True,
+        zero_delta_pair_prob=1.0,
+    )
+    sample = dataset[0]
+    assert sample["source_path"] == sample["target_path"]
+    assert sample["source_filename"] == sample["target_filename"]
+    assert sample["source_age"] == sample["target_age"]
+    assert sample["delta_age"] == 0
+    assert sample["source_prompt"] == sample["target_prompt"]
+    assert sample["source_prompt"] == f"photo of a person as {sample['source_age']}-year-old"
+    assert sample["generic_prompt"] == "photo of a person"
+    assert torch.equal(sample["source_image"], sample["target_image"])
+
+
+def test_zero_delta_probability_is_deterministic_and_approximately_correct(tmp_path: Path):
+    for age in (20, 30, 40, 50, 60):
+        write_image(tmp_path / "id_a" / f"{age}.png")
+    datasets = [
+        _dataset(
+            tmp_path,
+            pair_strategy="random_target",
+            include_zero_delta_pairs=True,
+            zero_delta_pair_prob=0.20,
+            seed=91,
+        )
+        for _ in range(2)
+    ]
+    observations = []
+    for dataset in datasets:
+        values = []
+        for draw in range(10_000):
+            dataset.set_epoch(draw // len(dataset))
+            values.append(dataset.pair_for_index(draw % len(dataset)).delta_age == 0)
+        observations.append(values)
+    assert observations[0] == observations[1]
+    assert sum(observations[0]) / len(observations[0]) == pytest.approx(0.20, abs=0.02)
+
+
+@pytest.mark.parametrize("probability", (-0.01, 1.01))
+def test_zero_delta_probability_validation(tmp_path: Path, probability: float):
+    write_image(tmp_path / "id_a" / "20.png")
+    write_image(tmp_path / "id_a" / "30.png")
+    with pytest.raises(ValueError, match="zero_delta_pair_prob"):
+        _dataset(tmp_path, zero_delta_pair_prob=probability)

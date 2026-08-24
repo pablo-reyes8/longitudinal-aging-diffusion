@@ -127,6 +127,13 @@ def train_model(
     use_relative_age_loss: bool | None = None,
     relative_age_weight: float | None = None,
     relative_age_loss_type: str | None = None,
+    use_preservation_loss: bool | None = None,
+    preservation_weight: float | None = None,
+    preservation_loss_type: str | None = None,
+    preservation_max_delta: float | None = None,
+    use_small_delta_weighting: bool | None = None,
+    small_delta_threshold: float | None = None,
+    small_delta_weight: float | None = None,
     warmup_ratio: float = 0.05,
     min_lr_ratio: float = 0.10,
     grad_accum_steps: int = 4,
@@ -255,6 +262,30 @@ def train_model(
         loss_fn.relative_age_loss_type = relative_age_loss_type
     if loss_fn.use_relative_age_loss and loss_fn.relative_age_weight > 0 and loss_fn.age_estimator is None:
         raise ValueError("Enabled relative age loss requires an age estimator")
+    if use_preservation_loss is not None:
+        loss_fn.use_preservation_loss = bool(use_preservation_loss)
+    if preservation_weight is not None:
+        if preservation_weight < 0:
+            raise ValueError("preservation_weight must be non-negative")
+        loss_fn.preservation_weight = float(preservation_weight)
+    if preservation_loss_type is not None:
+        if preservation_loss_type not in {"l1", "mse"}:
+            raise ValueError("preservation_loss_type must be 'l1' or 'mse'")
+        loss_fn.preservation_loss_type = preservation_loss_type
+    if preservation_max_delta is not None:
+        if preservation_max_delta < 0:
+            raise ValueError("preservation_max_delta must be non-negative")
+        loss_fn.preservation_max_delta = float(preservation_max_delta)
+    if use_small_delta_weighting is not None:
+        loss_fn.use_small_delta_weighting = bool(use_small_delta_weighting)
+    if small_delta_threshold is not None:
+        if small_delta_threshold < 0:
+            raise ValueError("small_delta_threshold must be non-negative")
+        loss_fn.small_delta_threshold = float(small_delta_threshold)
+    if small_delta_weight is not None:
+        if small_delta_weight < 1:
+            raise ValueError("small_delta_weight must be >= 1")
+        loss_fn.small_delta_weight = float(small_delta_weight)
     trainables = [parameter for _, parameter in get_bundle_trainable_named_parameters(bundle)]
     ensure_trainable_parameters_fp32(trainables)
     memory_features = _enable_memory_features(
@@ -311,6 +342,13 @@ def train_model(
         "use_relative_age_loss": loss_fn.use_relative_age_loss,
         "relative_age_weight": loss_fn.relative_age_weight,
         "relative_age_loss_type": loss_fn.relative_age_loss_type,
+        "use_preservation_loss": loss_fn.use_preservation_loss,
+        "preservation_weight": loss_fn.preservation_weight,
+        "preservation_loss_type": loss_fn.preservation_loss_type,
+        "preservation_max_delta": loss_fn.preservation_max_delta,
+        "use_small_delta_weighting": loss_fn.use_small_delta_weighting,
+        "small_delta_threshold": loss_fn.small_delta_threshold,
+        "small_delta_weight": loss_fn.small_delta_weight,
         "warmup_ratio": warmup_ratio, "warmup_steps": warmup_steps, "min_lr_ratio": min_lr_ratio,
         "max_grad_norm": max_grad_norm,
         "conditioning_dropout_prob": conditioning_dropout_prob,
@@ -338,6 +376,12 @@ def train_model(
         "monitoring_seed": monitoring_seed,
         "monitoring_target_ages": monitoring_ages,
         "monitoring_compute_diagnostics": bool(monitoring_compute_diagnostics),
+        "include_zero_delta_pairs": bool(
+            getattr(train_loader.dataset, "include_zero_delta_pairs", False)
+        ),
+        "zero_delta_pair_prob": float(
+            getattr(train_loader.dataset, "zero_delta_pair_prob", 0.0)
+        ),
     }
     root = Path(checkpoint_dir) if checkpoint_dir is not None else None
     trainable_parameters = sum(parameter.numel() for parameter in trainables)
@@ -388,6 +432,16 @@ def train_model(
         f" Objective     diffusion={loss_fn.diffusion_weight:g} | identity={loss_fn.identity_weight:g} | "
         f"age_abs={loss_fn.age_weight:g} | age_relative={loss_fn.relative_age_weight:g} "
         f"({'on' if loss_fn.use_relative_age_loss else 'off'}) | Min-SNR={min_snr_gamma}"
+    )
+    print(
+        f" Preservation enabled={loss_fn.use_preservation_loss} | weight={loss_fn.preservation_weight:g} | "
+        f"type={loss_fn.preservation_loss_type} | max_delta={loss_fn.preservation_max_delta:g}"
+    )
+    print(
+        f" Small-delta  self_pair_prob={getattr(train_loader.dataset, 'zero_delta_pair_prob', 0.0):.2f} "
+        f"(enabled={getattr(train_loader.dataset, 'include_zero_delta_pairs', False)}) | "
+        f"weighting={loss_fn.use_small_delta_weighting} | threshold={loss_fn.small_delta_threshold:g} | "
+        f"weight={loss_fn.small_delta_weight:g}"
     )
     print(
         f" Sampling      timesteps={min_train_timestep}-{timestep_end} ({timestep_sampling}) | "

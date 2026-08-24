@@ -38,11 +38,13 @@ def compose_weighted_losses(
 
 
 class FaceAgingDiffusionLoss(nn.Module):
-    """Diffusion objective with optional identity, absolute-age and relative-age terms.
+    """Diffusion objective with age, identity, and small-delta preservation terms.
 
     The relative branch compares the age change predicted by the frozen estimator
     against ``target_age - source_age``. Set ``use_relative_age_loss=False`` to
     disable it without removing the estimator used by the absolute-age branch.
+    Preservation is computed only for ``abs(delta_age) <= preservation_max_delta``;
+    binary small-delta weighting is applied to the per-sample diffusion objective.
     """
 
     def __init__(
@@ -58,6 +60,13 @@ class FaceAgingDiffusionLoss(nn.Module):
         use_relative_age_loss: bool = False,
         relative_age_weight: float = 0.0,
         relative_age_loss_type: str = "l1",
+        use_preservation_loss: bool = False,
+        preservation_weight: float = 0.10,
+        preservation_loss_type: str = "l1",
+        preservation_max_delta: float = 2.0,
+        use_small_delta_weighting: bool = False,
+        small_delta_threshold: float = 5.0,
+        small_delta_weight: float = 2.0,
         source_age_prediction_mode: str = "age_estimator",
         identity_reference: str = "target",
         diffusion_loss_type: str = "mse",
@@ -72,7 +81,10 @@ class FaceAgingDiffusionLoss(nn.Module):
         vae_decode_checkpointing: bool = False,
     ) -> None:
         super().__init__()
-        if diffusion_weight <= 0 or identity_weight < 0 or age_weight < 0 or relative_age_weight < 0:
+        if (
+            diffusion_weight <= 0 or identity_weight < 0 or age_weight < 0
+            or relative_age_weight < 0 or preservation_weight < 0
+        ):
             raise ValueError("diffusion_weight must be > 0 and auxiliary weights must be >= 0")
         if identity_reference not in {"source", "target", "both"}:
             raise ValueError("identity_reference must be 'source', 'target', or 'both'")
@@ -82,6 +94,14 @@ class FaceAgingDiffusionLoss(nn.Module):
             raise ValueError("age_loss_type must be 'l1' or 'mse'")
         if relative_age_loss_type not in {"l1", "mse"}:
             raise ValueError("relative_age_loss_type must be 'l1' or 'mse'")
+        if preservation_loss_type not in {"l1", "mse"}:
+            raise ValueError("preservation_loss_type must be 'l1' or 'mse'")
+        if preservation_max_delta < 0:
+            raise ValueError("preservation_max_delta must be non-negative")
+        if small_delta_threshold < 0:
+            raise ValueError("small_delta_threshold must be non-negative")
+        if small_delta_weight < 1:
+            raise ValueError("small_delta_weight must be >= 1")
         if source_age_prediction_mode != "age_estimator":
             raise ValueError("V1 supports source_age_prediction_mode='age_estimator'")
         if min_snr_gamma is not None and min_snr_gamma <= 0:
@@ -109,6 +129,13 @@ class FaceAgingDiffusionLoss(nn.Module):
         self.use_relative_age_loss = bool(use_relative_age_loss)
         self.relative_age_weight = float(relative_age_weight)
         self.relative_age_loss_type = relative_age_loss_type
+        self.use_preservation_loss = bool(use_preservation_loss)
+        self.preservation_weight = float(preservation_weight)
+        self.preservation_loss_type = preservation_loss_type
+        self.preservation_max_delta = float(preservation_max_delta)
+        self.use_small_delta_weighting = bool(use_small_delta_weighting)
+        self.small_delta_threshold = float(small_delta_threshold)
+        self.small_delta_weight = float(small_delta_weight)
         self.source_age_prediction_mode = source_age_prediction_mode
         self.identity_reference = identity_reference
         self.diffusion_loss_type = diffusion_loss_type
@@ -146,6 +173,13 @@ class FaceAgingDiffusionLoss(nn.Module):
             "use_relative_age_loss": self.use_relative_age_loss,
             "relative_age_weight": self.relative_age_weight,
             "relative_age_loss_type": self.relative_age_loss_type,
+            "use_preservation_loss": self.use_preservation_loss,
+            "preservation_weight": self.preservation_weight,
+            "preservation_loss_type": self.preservation_loss_type,
+            "preservation_max_delta": self.preservation_max_delta,
+            "use_small_delta_weighting": self.use_small_delta_weighting,
+            "small_delta_threshold": self.small_delta_threshold,
+            "small_delta_weight": self.small_delta_weight,
             "source_age_prediction_mode": self.source_age_prediction_mode,
             "identity_reference": self.identity_reference,
             "diffusion_loss_type": self.diffusion_loss_type,
@@ -241,7 +275,7 @@ class FaceAgingDiffusionLoss(nn.Module):
             raise ValueError(f"target_ages must have shape [{batch_size}], got {tuple(ages.shape)}")
         return ages
 
-    def _normalize_relative_age_targets(
+    def _normalize_delta_targets(
         self,
         *,
         source_ages,
@@ -255,13 +289,13 @@ class FaceAgingDiffusionLoss(nn.Module):
         else:
             if source_ages is None or target_ages is None:
                 raise ValueError(
-                    "Relative age loss requires delta_ages or both source_ages and target_ages"
+                    "Age-delta objectives require delta_ages or both source_ages and target_ages"
                 )
             sources = torch.as_tensor(source_ages, device=device, dtype=torch.float32)
             targets = torch.as_tensor(target_ages, device=device, dtype=torch.float32)
             deltas = targets - sources
         if deltas.ndim != 1 or deltas.shape[0] != batch_size:
-            raise ValueError(f"Relative age targets must have shape [{batch_size}]")
+            raise ValueError(f"delta_ages must have shape [{batch_size}]")
         return deltas
 
     def _validate_image_batch(self, name: str, images: torch.Tensor | None, batch_size: int, device: torch.device) -> torch.Tensor:
@@ -294,7 +328,7 @@ class FaceAgingDiffusionLoss(nn.Module):
         self._validate_core_shapes(model_pred, noise, noisy_target_latents, target_latents, timesteps)
         self._check_finite(model_pred=model_pred, noise=noise, noisy_target_latents=noisy_target_latents, target_latents=target_latents)
         diffusion_target = get_diffusion_target(self.scheduler, target_latents, noise, timesteps)
-        loss_diff, loss_diff_per_sample, snr_weights = compute_diffusion_loss(
+        loss_diff_unweighted, raw_loss_diff_per_sample, snr_weights = compute_diffusion_loss(
             model_pred,
             diffusion_target,
             scheduler=self.scheduler,
@@ -302,11 +336,40 @@ class FaceAgingDiffusionLoss(nn.Module):
             loss_type=self.diffusion_loss_type,
             min_snr_gamma=self.min_snr_gamma,
         )
+        batch_size = model_pred.shape[0]
+        relative_active = self.use_relative_age_loss and self.relative_age_weight > 0
+        preservation_active = self.use_preservation_loss and self.preservation_weight > 0
+        delta_objective_active = (
+            relative_active or preservation_active or self.use_small_delta_weighting
+        )
+        normalized_deltas = (
+            self._normalize_delta_targets(
+                source_ages=source_ages,
+                target_ages=target_ages,
+                delta_ages=delta_ages,
+                batch_size=batch_size,
+                device=model_pred.device,
+            )
+            if delta_objective_active else None
+        )
+        if self.use_small_delta_weighting:
+            small_delta_mask = normalized_deltas.abs() <= self.small_delta_threshold
+            sample_weights = torch.where(
+                small_delta_mask,
+                raw_loss_diff_per_sample.new_full((), self.small_delta_weight),
+                raw_loss_diff_per_sample.new_ones(()),
+            )
+        else:
+            small_delta_mask = torch.zeros(batch_size, dtype=torch.bool, device=model_pred.device)
+            sample_weights = raw_loss_diff_per_sample.new_ones(batch_size)
+        loss_diff_per_sample = raw_loss_diff_per_sample * sample_weights
+        loss_diff = loss_diff_per_sample.mean()
         zero = loss_diff.new_zeros(())
-        loss_id, loss_age, loss_relative_age = zero, zero, zero
+        loss_id, loss_age, loss_relative_age, loss_preservation = zero, zero, zero, zero
         id_per_sample = loss_diff.new_empty(0)
         age_per_sample = loss_diff.new_empty(0)
         relative_age_per_sample = loss_diff.new_empty(0)
+        preservation_per_sample = loss_diff.new_empty(0)
         identity_cosine_mean = None
         predicted_age_mean = None
         target_age_mean = None
@@ -317,12 +380,20 @@ class FaceAgingDiffusionLoss(nn.Module):
         pred_x0_latents = None
         pred_x0_images = None
 
-        relative_active = self.use_relative_age_loss and self.relative_age_weight > 0
         auxiliary_requested = (
             self.identity_weight > 0 or self.age_weight > 0 or relative_active or return_reconstructions
         )
         indices = self._select_auxiliary_indices(timesteps, int(global_step)) if auxiliary_requested else torch.empty(0, dtype=torch.long, device=timesteps.device)
         auxiliary_applied = indices.numel() > 0
+        preservation_mask = (
+            normalized_deltas.abs() <= self.preservation_max_delta
+            if preservation_active
+            else torch.zeros(batch_size, dtype=torch.bool, device=model_pred.device)
+        )
+        preservation_indices = torch.where(preservation_mask)[0]
+        preservation_applied = preservation_indices.numel() > 0
+        decode_indices = torch.cat((indices, preservation_indices)).unique(sorted=True)
+        decode_applied = decode_indices.numel() > 0
         identity_indices = indices
         if identity_sample_mask is not None:
             if identity_sample_mask.shape != (model_pred.shape[0],) or identity_sample_mask.dtype != torch.bool:
@@ -330,10 +401,10 @@ class FaceAgingDiffusionLoss(nn.Module):
             if identity_sample_mask.device != model_pred.device:
                 raise ValueError("identity_sample_mask and model_pred must be on the same device")
             identity_indices = indices[identity_sample_mask.index_select(0, indices)]
-        if auxiliary_applied:
-            selected_pred = model_pred.index_select(0, indices)
-            selected_noisy = noisy_target_latents.index_select(0, indices)
-            selected_timesteps = timesteps.index_select(0, indices)
+        if decode_applied:
+            selected_pred = model_pred.index_select(0, decode_indices)
+            selected_noisy = noisy_target_latents.index_select(0, decode_indices)
+            selected_timesteps = timesteps.index_select(0, decode_indices)
             pred_x0_latents = predict_x0_from_model_output(
                 selected_pred, selected_noisy, selected_timesteps, self.scheduler
             )
@@ -353,14 +424,35 @@ class FaceAgingDiffusionLoss(nn.Module):
             pred_x0_images = sd_image_to_01(decoded, clamp=self.clamp_pred_x0)
             self._check_finite(pred_x0_latents=pred_x0_latents, pred_x0_images=pred_x0_images)
 
-            batch_size = model_pred.shape[0]
-            if self.identity_weight > 0:
+            auxiliary_local_indices = torch.searchsorted(decode_indices, indices)
+            auxiliary_images = pred_x0_images.index_select(0, auxiliary_local_indices)
+            if preservation_applied:
+                source_checked = self._validate_image_batch(
+                    "source_images", source_images, batch_size, model_pred.device
+                )
+                preservation_local_indices = torch.searchsorted(
+                    decode_indices, preservation_indices
+                )
+                generated_preservation = pred_x0_images.index_select(
+                    0, preservation_local_indices
+                )
+                source_preservation = sd_image_to_01(
+                    source_checked.index_select(0, preservation_indices), clamp=True
+                )
+                preservation_error = generated_preservation - source_preservation
+                preservation_per_sample = (
+                    preservation_error.abs().flatten(1).mean(1)
+                    if self.preservation_loss_type == "l1"
+                    else preservation_error.square().flatten(1).mean(1)
+                )
+                loss_preservation = preservation_per_sample.mean()
+            if auxiliary_applied and self.identity_weight > 0:
                 target_images_checked = self._validate_image_batch("target_images", target_images, batch_size, model_pred.device)
                 if identity_indices.numel() > 0:
-                    # pred_x0_images follows `indices`; select the corresponding
+                    # auxiliary_images follows `indices`; select the corresponding
                     # local positions after conditioning-dropout filtering.
                     local_identity_mask = identity_sample_mask.index_select(0, indices) if identity_sample_mask is not None else torch.ones_like(indices, dtype=torch.bool)
-                    identity_images = pred_x0_images[local_identity_mask]
+                    identity_images = auxiliary_images[local_identity_mask]
                     pred_embeddings = self.identity_encoder(identity_images)
                     reference_losses = []
                     if self.identity_reference in {"target", "both"}:
@@ -375,10 +467,10 @@ class FaceAgingDiffusionLoss(nn.Module):
                     id_per_sample = torch.stack(reference_losses, dim=0).mean(dim=0)
                     loss_id = id_per_sample.mean()
                     identity_cosine_mean = float((1.0 - id_per_sample.detach()).mean())
-            if self.age_weight > 0 or relative_active:
+            if auxiliary_applied and (self.age_weight > 0 or relative_active):
                 ages = self._normalize_target_ages(target_ages, model_pred.shape[0], model_pred.device)
                 selected_ages = ages.index_select(0, indices)
-                predicted_ages = self.age_estimator(pred_x0_images)
+                predicted_ages = self.age_estimator(auxiliary_images)
                 if self.age_weight > 0:
                     age_per_sample = (
                         (predicted_ages - selected_ages).abs()
@@ -395,13 +487,7 @@ class FaceAgingDiffusionLoss(nn.Module):
                     source_01 = sd_image_to_01(source_checked.index_select(0, indices), clamp=True)
                     with torch.no_grad():
                         predicted_source_ages = self.age_estimator(source_01).detach()
-                    target_deltas = self._normalize_relative_age_targets(
-                        source_ages=source_ages,
-                        target_ages=target_ages,
-                        delta_ages=delta_ages,
-                        batch_size=model_pred.shape[0],
-                        device=model_pred.device,
-                    ).index_select(0, indices)
+                    target_deltas = normalized_deltas.index_select(0, indices)
                     predicted_deltas = predicted_ages - predicted_source_ages
                     relative_errors = predicted_deltas - target_deltas
                     relative_age_per_sample = (
@@ -426,10 +512,14 @@ class FaceAgingDiffusionLoss(nn.Module):
         weighted_relative_age = (
             loss_relative_age * self.relative_age_weight if relative_active else zero
         )
-        total_loss = total_loss + weighted_relative_age
+        weighted_preservation = (
+            loss_preservation * self.preservation_weight if preservation_active else zero
+        )
+        total_loss = total_loss + weighted_relative_age + weighted_preservation
         self._check_finite(
             loss=total_loss, loss_diff=loss_diff, loss_id=loss_id,
             loss_age=loss_age, loss_relative_age=loss_relative_age,
+            loss_preservation=loss_preservation,
         )
         diff_denominator = max(abs(float(weighted_diff.detach())), torch.finfo(torch.float32).eps)
         metrics = {
@@ -438,10 +528,13 @@ class FaceAgingDiffusionLoss(nn.Module):
             "loss_id": float(loss_id.detach()),
             "loss_age": float(loss_age.detach()),
             "loss_relative_age": float(loss_relative_age.detach()),
+            "loss_preservation": float(loss_preservation.detach()),
+            "loss_diff_unweighted": float(loss_diff_unweighted.detach()),
             "weighted_diff": float(weighted_diff.detach()),
             "weighted_id": float(weighted_id.detach()),
             "weighted_age": float(weighted_age.detach()),
             "weighted_relative_age": float(weighted_relative_age.detach()),
+            "weighted_preservation": float(weighted_preservation.detach()),
             "identity_cosine_mean": identity_cosine_mean,
             "pred_age_mean": predicted_age_mean,
             "target_age_mean": target_age_mean,
@@ -453,11 +546,18 @@ class FaceAgingDiffusionLoss(nn.Module):
             "identity_to_diffusion_ratio": abs(float(weighted_id.detach())) / diff_denominator,
             "age_to_diffusion_ratio": abs(float(weighted_age.detach())) / diff_denominator,
             "relative_age_to_diffusion_ratio": abs(float(weighted_relative_age.detach())) / diff_denominator,
+            "preservation_to_diffusion_ratio": abs(float(weighted_preservation.detach())) / diff_denominator,
             "auxiliary_applied": auxiliary_applied,
             "auxiliary_count": int(indices.numel()),
             "identity_count": int(identity_indices.numel()) if self.identity_weight > 0 else 0,
             "age_count": int(indices.numel()) if self.age_weight > 0 else 0,
             "relative_age_count": int(indices.numel()) if relative_active else 0,
+            "preservation_applied": preservation_applied,
+            "preservation_count": int(preservation_indices.numel()),
+            "preservation_active_fraction": float(preservation_mask.float().mean()),
+            "small_delta_count": int(small_delta_mask.sum()),
+            "small_delta_fraction": float(small_delta_mask.float().mean()),
+            "small_delta_mean_weight": float(sample_weights.detach().mean()),
         }
         output: dict[str, Any] = {
             "loss": total_loss,
@@ -465,13 +565,17 @@ class FaceAgingDiffusionLoss(nn.Module):
             "loss_id": loss_id,
             "loss_age": loss_age,
             "loss_relative_age": loss_relative_age,
+            "loss_preservation": loss_preservation,
             "weighted_diff": weighted_diff,
             "weighted_id": weighted_id,
             "weighted_age": weighted_age,
             "weighted_relative_age": weighted_relative_age,
+            "weighted_preservation": weighted_preservation,
             "auxiliary_applied": auxiliary_applied,
             "auxiliary_indices": indices.detach(),
             "identity_indices": identity_indices.detach(),
+            "preservation_indices": preservation_indices.detach(),
+            "reconstruction_indices": decode_indices.detach(),
             "metrics": metrics,
         }
         if snr_weights is not None:
@@ -479,11 +583,14 @@ class FaceAgingDiffusionLoss(nn.Module):
         if return_per_sample:
             output.update({
                 "loss_diff_per_sample": loss_diff_per_sample,
+                "loss_diff_per_sample_unweighted": raw_loss_diff_per_sample,
+                "small_delta_sample_weights": sample_weights.detach(),
                 "loss_id_per_sample": id_per_sample,
                 "loss_age_per_sample": age_per_sample,
                 "loss_relative_age_per_sample": relative_age_per_sample,
+                "loss_preservation_per_sample": preservation_per_sample,
             })
-        if return_reconstructions and auxiliary_applied:
+        if return_reconstructions and decode_applied:
             output["pred_x0_latents"] = pred_x0_latents
             output["pred_x0_images"] = pred_x0_images
         return output

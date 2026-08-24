@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-EE4C2C?logo=pytorch&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Tests](https://img.shields.io/badge/tests-215%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-233%20passed-brightgreen)
 
 Supervised photo aging from real longitudinal observations. The project adapts
 Stable Diffusion 1.5 with source-image conditioning, explicit absolute/relative
@@ -136,8 +136,12 @@ conditioning dropout, a fixed monitoring seed, direct monitoring at strength
 signed delta with eight Fourier frequency bands, a 256-unit hidden layer, and
 a trainable output gate initialized to `1.0`. Training independently mixes 70%
 numeric target-age prompts with 30% generic aging prompts. It loads frozen
-`py-feat/arcface_r50` and `iitolstykh/mivolo_v2` auxiliaries. To control VRAM,
-their losses run every fourth training microbatch on 25% of eligible samples and use
+`py-feat/arcface_r50` and `iitolstykh/mivolo_v2` auxiliaries. The zero-delta
+baseline injects 20% train-only self-pairs, adds decoded L1 preservation with
+weight `0.10` for `|delta_age| <= 2`, and weights diffusion samples `2x` for
+`|delta_age| <= 5`. Validation and test retain only real longitudinal pairs.
+To control VRAM, the ArcFace and MiVOLO losses run every fourth training
+microbatch on 25% of eligible samples and use
 activation checkpointing through the VAE and auxiliary networks. See
 [`notebooks/training.ipynb`](notebooks/training.ipynb) for the complete setup.
 Training images should already be face-centered or aligned: a non-differentiable
@@ -208,7 +212,8 @@ from data import build_face_aging_dataloaders
 from src.inference import infer_face_aging
 
 loaders, metadata = build_face_aging_dataloaders(
-    "/path/to/dataset_root", image_size=256, batch_size=4
+    "/path/to/dataset_root", image_size=256, batch_size=4,
+    include_zero_delta_pairs=True, zero_delta_pair_prob=0.20,
 )
 
 result = infer_face_aging(

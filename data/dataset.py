@@ -60,6 +60,8 @@ class FaceAgingDataset(Dataset):
         prompt_style: str = "selfage",
         dynamic_person_word: bool = False,
         horizontal_flip_prob: float = 0.0,
+        include_zero_delta_pairs: bool = False,
+        zero_delta_pair_prob: float = 0.20,
         seed: int = 42,
     ) -> None:
         if pair_strategy not in {"all", "random_target"}:
@@ -68,6 +70,8 @@ class FaceAgingDataset(Dataset):
             raise ValueError("image_size must be positive")
         if not 0.0 <= horizontal_flip_prob <= 1.0:
             raise ValueError("horizontal_flip_prob must be in [0, 1]")
+        if not 0.0 <= zero_delta_pair_prob <= 1.0:
+            raise ValueError("zero_delta_pair_prob must be in [0, 1]")
         self.root_dir = Path(root_dir).expanduser().resolve()
         self.manifest = list(manifest)
         self.image_size = image_size
@@ -75,6 +79,8 @@ class FaceAgingDataset(Dataset):
         self.prompt_style = prompt_style
         self.dynamic_person_word = dynamic_person_word
         self.horizontal_flip_prob = horizontal_flip_prob
+        self.include_zero_delta_pairs = bool(include_zero_delta_pairs)
+        self.zero_delta_pair_prob = float(zero_delta_pair_prob)
         self.seed = seed
         # A shared tensor propagates set_epoch() to persistent DataLoader workers.
         self._shared_epoch = torch.zeros((), dtype=torch.int64).share_memory_()
@@ -100,10 +106,32 @@ class FaceAgingDataset(Dataset):
 
     def pair_for_index(self, index: int) -> PairRecord:
         if self.pair_strategy == "all":
-            return self.all_pairs[index]
-        _, candidates = self._source_candidates[index]
-        choice = _stable_uint64(self.seed, self.epoch, index, "target") % len(candidates)
-        return candidates[choice]
+            pair = self.all_pairs[index]
+        else:
+            _, candidates = self._source_candidates[index]
+            choice = _stable_uint64(self.seed, self.epoch, index, "target") % len(candidates)
+            pair = candidates[choice]
+        zero_delta_draw = _stable_uint64(
+            self.seed, self.epoch, index, "zero_delta"
+        ) / 2**64
+        if self.include_zero_delta_pairs and zero_delta_draw < self.zero_delta_pair_prob:
+            self_index = (
+                pair.source_index
+                if _stable_uint64(self.seed, self.epoch, index, "zero_delta_image") % 2 == 0
+                else pair.target_index
+            )
+            source = self.manifest[self_index]
+            return PairRecord(
+                person_id=source.person_id,
+                source_index=self_index,
+                target_index=self_index,
+                source_age=source.age,
+                target_age=source.age,
+                delta_age=0,
+                source_path=source.relative_path,
+                target_path=source.relative_path,
+            )
+        return pair
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         pair = self.pair_for_index(index)

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 
 AGE_BANDS = ((0, 4), (5, 14), (15, 24), (25, 34), (35, 44), (45, 54), (55, 64), (65, None))
-DELTA_BANDS = ((1, 4), (5, 9), (10, 19), (20, 29), (30, 39), (40, None))
+DELTA_BANDS = ((0, 0), (1, 4), (5, 9), (10, 19), (20, 29), (30, 39), (40, None))
 
 
 def _describe(values: Sequence[int | float]) -> dict:

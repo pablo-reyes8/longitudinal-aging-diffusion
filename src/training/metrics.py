@@ -35,7 +35,7 @@ class MetricsTracker:
         return {(f"{prefix}/{name}" if prefix else name): meter.average for name, meter in self.meters.items()}
 
 
-AGE_GAP_BINS = ((1, 4, "1-4"), (5, 9, "5-9"), (10, 19, "10-19"), (20, 29, "20-29"), (30, None, "30+"))
+AGE_GAP_BINS = ((0, 0, "0"), (1, 4, "1-4"), (5, 9, "5-9"), (10, 19, "10-19"), (20, 29, "20-29"), (30, None, "30+"))
 AGE_BANDS = ((0, 14, "0-14"), (15, 29, "15-29"), (30, 44, "30-44"), (45, 59, "45-59"), (60, None, "60+"))
 
 

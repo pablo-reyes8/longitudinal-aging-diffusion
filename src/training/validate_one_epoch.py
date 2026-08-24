@@ -36,6 +36,10 @@ def _stratified_metrics(tracker: MetricsTracker, batch, output: dict, loss_fn) -
         indices = output["auxiliary_indices"]
         values = output["loss_relative_age_per_sample"].detach().float()
         total[indices] += loss_fn.relative_age_weight * values
+    if output["loss_preservation_per_sample"].numel():
+        indices = output["preservation_indices"]
+        values = output["loss_preservation_per_sample"].detach().float()
+        total[indices] += loss_fn.preservation_weight * values
     for index in range(batch_size):
         gap = bin_name(float(batch["delta_age"][index]), AGE_GAP_BINS)
         source_band = bin_name(float(batch["source_age"][index]), AGE_BANDS)
@@ -115,10 +119,15 @@ def validate_one_epoch(
                     "loss_id": float(output["loss_id"]),
                     "loss_age": float(output["loss_age"]),
                     "loss_relative_age": float(output["loss_relative_age"]),
+                    "loss_preservation": float(output["loss_preservation"]),
                     "weighted_diff": float(output["weighted_diff"]),
                     "weighted_id": float(output["weighted_id"]),
                     "weighted_age": float(output["weighted_age"]),
                     "weighted_relative_age": float(output["weighted_relative_age"]),
+                    "weighted_preservation": float(output["weighted_preservation"]),
+                    "preservation_active_fraction": output["metrics"]["preservation_active_fraction"],
+                    "small_delta_fraction": output["metrics"]["small_delta_fraction"],
+                    "small_delta_mean_weight": output["metrics"]["small_delta_mean_weight"],
                     "identity_cosine": output["metrics"]["identity_cosine_mean"],
                     "age_mae": float(output["loss_age"]) if loss_fn.age_loss_type == "l1" else float(output["loss_age"].sqrt()),
                     **result["diagnostics"],

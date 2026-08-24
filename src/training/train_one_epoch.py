@@ -55,7 +55,8 @@ def _format_eta(seconds: float) -> str:
 def _component_values(first: dict, second: dict | None, first_weight: float, second_weight: float) -> dict[str, float]:
     names = (
         "loss", "loss_diff", "loss_id", "loss_age", "loss_relative_age",
-        "weighted_diff", "weighted_id", "weighted_age", "weighted_relative_age",
+        "loss_preservation", "weighted_diff", "weighted_id", "weighted_age",
+        "weighted_relative_age", "weighted_preservation",
     )
     result = {}
     for name in names:
@@ -87,6 +88,12 @@ def _component_values(first: dict, second: dict | None, first_weight: float, sec
         )
     result["identity_sample_fraction"] = first_metrics["identity_count"] / max(1, first["loss_diff_per_sample"].shape[0]) if "identity_count" in first_metrics else 0.0
     result["age_sample_fraction"] = first_metrics["age_count"] / max(1, first["loss_diff_per_sample"].shape[0]) if "age_count" in first_metrics else 0.0
+    for name in (
+        "preservation_active_fraction", "small_delta_fraction", "small_delta_mean_weight",
+    ):
+        first_value = float(first_metrics.get(name, 0.0))
+        second_value = float(second_metrics.get(name, 0.0)) if second_metrics is not None else 0.0
+        result[name] = first_weight * first_value + second_weight * second_value
     return result
 
 
@@ -109,6 +116,11 @@ def _update_gap_metrics(tracker: MetricsTracker, batch, loss_out: dict, loss_fn)
         indices = loss_out["auxiliary_indices"]
         values = relative_per_sample.detach().float()
         per_sample[indices] += loss_fn.relative_age_weight * values
+    preservation_per_sample = loss_out.get("loss_preservation_per_sample")
+    if preservation_per_sample is not None and preservation_per_sample.numel():
+        indices = loss_out["preservation_indices"]
+        values = preservation_per_sample.detach().float()
+        per_sample[indices] += loss_fn.preservation_weight * values
     deltas = batch["delta_age"].detach()
     for index in range(per_sample.shape[0]):
         gap = bin_name(float(deltas[index]), AGE_GAP_BINS)
@@ -175,13 +187,14 @@ def train_one_epoch(
     iterator = iter(train_loader)
     processed_batches = processed_samples = skipped_nonfinite = skipped_updates = double_prompt_batches = 0
     numeric_prompt_count = generic_prompt_count = 0
+    preservation_sample_count = small_delta_sample_count = 0
     consecutive_nonfinite = 0
     start = time.perf_counter()
     if log_every:
         print(f" Epoch {epoch + 1:02d} - training progress")
         print(
             "   batch       done    opt.step   total     diffusion  identity  age.abs  age.rel  "
-            "generic  age.gate  grad     LoRA lr    samples/s   ETA"
+            "preserve  active   smallΔ   generic  age.gate  grad     LoRA lr    samples/s   ETA"
         )
     while processed_batches < total_batches:
         if max_optimizer_steps is not None and optimizer_step >= max_optimizer_steps:
@@ -226,6 +239,8 @@ def train_one_epoch(
             })
             numeric_prompt_count += prompt_selection["numeric_count"]
             generic_prompt_count += prompt_selection["generic_count"]
+            preservation_sample_count += int(first_out["metrics"].get("preservation_count", 0))
+            small_delta_sample_count += int(first_out["metrics"].get("small_delta_count", 0))
             if not torch.isfinite(first_out["loss"]):
                 window_failed = True
             else:
@@ -303,6 +318,9 @@ def train_one_epoch(
                 f"{current.get('loss_id', float('nan')):8.4f}  "
                 f"{current.get('loss_age', float('nan')):7.3f}  "
                 f"{current.get('loss_relative_age', float('nan')):7.3f}  "
+                f"{current.get('loss_preservation', float('nan')):8.4f}  "
+                f"{current.get('preservation_active_fraction', float('nan')):6.1%}  "
+                f"{current.get('small_delta_fraction', float('nan')):6.1%}  "
                 f"{current.get('generic_prompt_fraction', float('nan')):7.1%}  "
                 f"{current.get('age_conditioner_scale', float('nan')):8.3f}  "
                 f"{current.get('grad_norm', float('nan')):7.3f}  "
@@ -329,6 +347,8 @@ def train_one_epoch(
         "train/generic_prompt_count": float(generic_prompt_count),
         "train/numeric_prompt_fraction": numeric_prompt_count / max(1, numeric_prompt_count + generic_prompt_count),
         "train/generic_prompt_fraction": generic_prompt_count / max(1, numeric_prompt_count + generic_prompt_count),
+        "train/num_preservation_samples": float(preservation_sample_count),
+        "train/num_small_delta_samples": float(small_delta_sample_count),
     })
     return {
         "metrics": metrics,

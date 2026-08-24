@@ -33,6 +33,10 @@ PROTECTED_TRAINING_KEYS = (
     "use_age_delta_conditioning", "age_conditioning_mode", "age_delta_scale",
     "use_age_conditioner_v2", "age_conditioning_version",
     "use_relative_age_loss", "relative_age_weight", "relative_age_loss_type",
+    "use_preservation_loss", "preservation_weight", "preservation_loss_type",
+    "preservation_max_delta", "use_small_delta_weighting",
+    "small_delta_threshold", "small_delta_weight",
+    "include_zero_delta_pairs", "zero_delta_pair_prob",
     "target_prompt_policy", "generic_prompt_prob", "numeric_prompt_prob",
 )
 V2_ONLY_BUNDLE_KEYS = {

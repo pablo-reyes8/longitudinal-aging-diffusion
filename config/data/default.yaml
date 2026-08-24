@@ -11,6 +11,8 @@ max_age_gap: null
 prompt_style: selfage
 dynamic_person_word: false
 horizontal_flip_prob: 0.2
+include_zero_delta_pairs: true
+zero_delta_pair_prob: 0.20
 normalize_over_100: true
 pin_memory: true
 persistent_workers: true

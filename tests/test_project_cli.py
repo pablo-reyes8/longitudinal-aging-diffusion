@@ -34,6 +34,16 @@ def test_all_default_yaml_configs_are_mappings_and_model_dtype_is_resolved():
     assert model["auxiliary_dtype"] is None
     assert model["use_age_delta_conditioning"] is True
     assert model["age_delta_scale"] == 80.0
+    data = load_yaml("config/data/default.yaml")
+    training = load_yaml("config/training/photo_editing.yaml")
+    assert data["include_zero_delta_pairs"] is True
+    assert data["zero_delta_pair_prob"] == 0.20
+    assert training["loss"]["use_preservation_loss"] is True
+    assert training["loss"]["preservation_weight"] == 0.10
+    assert training["loss"]["preservation_max_delta"] == 2
+    assert training["loss"]["use_small_delta_weighting"] is True
+    assert training["loss"]["small_delta_threshold"] == 5
+    assert training["loss"]["small_delta_weight"] == 2.0
     assert resolve_dtype("bf16") is torch.bfloat16
     assert resolve_dtype("fp16") is torch.float16
 

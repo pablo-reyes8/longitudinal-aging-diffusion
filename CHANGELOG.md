@@ -23,3 +23,6 @@ to use semantic versioning after its first stable release.
   legacy null-reference modes for direct inference and training monitoring.
 - Independent per-sample numeric/generic prompt regularization for training,
   including deterministic sampling and epoch-level policy diagnostics.
+- Train-only zero-delta self-pair injection, decoded source-preservation loss,
+  and binary small-delta diffusion weighting with checkpointed configuration
+  and activation metrics.

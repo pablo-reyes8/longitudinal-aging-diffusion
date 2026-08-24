@@ -157,3 +157,89 @@ def test_real_loader_train_updates_lora_and_conv_only(tiny_root):
     assert all(torch.equal(p, frozen_before[name]) for name, p in bundle["unet"].named_parameters() if not p.requires_grad)
     assert all(torch.equal(p, vae_before[name]) for name, p in bundle["vae"].named_parameters())
     assert all(torch.equal(p, text_before[name]) for name, p in bundle["text_encoder"].named_parameters())
+
+
+def test_zero_delta_training_step_activates_preservation_and_weighting():
+    bundle = make_training_bundle()
+    loss_fn = make_training_loss(bundle, auxiliaries=False)
+    loss_fn.use_preservation_loss = True
+    loss_fn.preservation_weight = 0.10
+    loss_fn.preservation_max_delta = 2
+    loss_fn.use_small_delta_weighting = True
+    loss_fn.small_delta_threshold = 5
+    loss_fn.small_delta_weight = 2.0
+    batch = synthetic_batch(3)
+    batch["target_image"] = batch["source_image"].clone()
+    batch["target_age"] = batch["source_age"].clone()
+    batch["delta_age"] = torch.zeros(3, dtype=torch.long)
+    batch["target_prompt"] = [
+        f"photo of a person as {int(age)}-year-old" for age in batch["source_age"]
+    ]
+    output = run_training_step(
+        bundle=bundle,
+        loss_fn=loss_fn,
+        batch=batch,
+        device=torch.device("cpu"),
+        amp_enabled=False,
+        conditioning_dropout_prob=0,
+        sample_target_posterior=False,
+    )["loss_out"]
+    assert torch.isfinite(output["loss"])
+    assert output["metrics"]["preservation_count"] == 3
+    assert output["metrics"]["preservation_active_fraction"] == 1.0
+    assert output["metrics"]["small_delta_count"] == 3
+    assert output["small_delta_sample_weights"].tolist() == [2.0, 2.0, 2.0]
+    output["loss"].backward()
+    assert any(
+        parameter.grad is not None and torch.isfinite(parameter.grad).all()
+        for parameter in bundle["unet"].parameters()
+        if parameter.requires_grad
+    )
+
+
+def test_zero_delta_training_epoch_reports_active_sample_counts(tiny_root):
+    from data import build_face_aging_dataloaders
+    from src.model import build_face_aging_optimizer
+
+    loaders, _ = build_face_aging_dataloaders(
+        tiny_root,
+        image_size=32,
+        batch_size=2,
+        num_workers=0,
+        train_drop_last=False,
+        train_shuffle=False,
+        include_zero_delta_pairs=True,
+        zero_delta_pair_prob=1.0,
+    )
+    bundle = make_training_bundle()
+    loss_fn = make_training_loss(bundle, auxiliaries=False)
+    loss_fn.use_preservation_loss = True
+    loss_fn.preservation_weight = 0.10
+    loss_fn.preservation_max_delta = 2
+    loss_fn.use_small_delta_weighting = True
+    loss_fn.small_delta_threshold = 5
+    loss_fn.small_delta_weight = 2.0
+    optimizer = build_face_aging_optimizer(
+        bundle, lr_lora=1e-3, lr_conv_in=1e-3, weight_decay=0
+    )
+    result = train_one_epoch(
+        bundle=bundle,
+        loss_fn=loss_fn,
+        train_loader=loaders["train"],
+        optimizer=optimizer,
+        lr_scheduler=None,
+        device=torch.device("cpu"),
+        epoch=0,
+        amp_enabled=False,
+        grad_accum_steps=1,
+        max_batches=2,
+        log_every=0,
+        sample_target_posterior=False,
+        generator=torch.Generator().manual_seed(404),
+    )
+    metrics = result["metrics"]
+    assert torch.isfinite(torch.tensor(metrics["train/loss_total"]))
+    assert metrics["train/preservation_active_fraction"] == 1.0
+    assert metrics["train/small_delta_fraction"] == 1.0
+    assert metrics["train/num_preservation_samples"] == result["num_samples"]
+    assert metrics["train/num_small_delta_samples"] == result["num_samples"]

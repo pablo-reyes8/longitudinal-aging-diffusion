@@ -80,3 +80,29 @@ def test_validation_report_is_structured_and_passes(tiny_root: Path):
         assert key in report
     assert report["manifest_stats"]["identities"] == 8
     assert report["pair_stats"]["total_valid_pairs"] == 24
+
+
+def test_loader_injects_zero_delta_only_into_training_split(tiny_root: Path):
+    loaders, metadata = build_face_aging_dataloaders(
+        tiny_root,
+        batch_size=16,
+        num_workers=0,
+        train_shuffle=False,
+        train_drop_last=False,
+        include_zero_delta_pairs=True,
+        zero_delta_pair_prob=1.0,
+    )
+    train_batch = next(iter(loaders["train"]))
+    assert torch.all(train_batch["delta_age"] == 0)
+    assert all(
+        source == target
+        for source, target in zip(train_batch["source_path"], train_batch["target_path"])
+    )
+    for split in ("val", "test"):
+        assert all(
+            pair.delta_age > 0
+            for pair in metadata["datasets"][split].all_pairs
+        )
+        assert metadata["datasets"][split].include_zero_delta_pairs is False
+    assert metadata["config"]["include_zero_delta_pairs"] is True
+    assert metadata["config"]["zero_delta_pair_prob"] == 1.0

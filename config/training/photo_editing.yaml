@@ -15,6 +15,13 @@ age_delta_scale: 80.0
 use_relative_age_loss: true
 relative_age_weight: 0.05
 relative_age_loss_type: l1
+use_preservation_loss: true
+preservation_weight: 0.10
+preservation_loss_type: l1
+preservation_max_delta: 2
+use_small_delta_weighting: true
+small_delta_threshold: 5
+small_delta_weight: 2.0
 warmup_ratio: 0.05
 min_lr_ratio: 0.10
 grad_accum_steps: 4
@@ -68,6 +75,13 @@ loss:
   use_relative_age_loss: true
   relative_age_weight: 0.05
   relative_age_loss_type: l1
+  use_preservation_loss: true
+  preservation_weight: 0.10
+  preservation_loss_type: l1
+  preservation_max_delta: 2
+  use_small_delta_weighting: true
+  small_delta_threshold: 5
+  small_delta_weight: 2.0
   source_age_prediction_mode: age_estimator
   identity_reference: target
   diffusion_loss_type: mse
