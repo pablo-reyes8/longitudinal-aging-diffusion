@@ -134,6 +134,8 @@ def train_model(
     use_small_delta_weighting: bool | None = None,
     small_delta_threshold: float | None = None,
     small_delta_weight: float | None = None,
+    use_bidirectional_training: bool = False,
+    reverse_pair_prob: float = 0.20,
     warmup_ratio: float = 0.05,
     min_lr_ratio: float = 0.10,
     grad_accum_steps: int = 4,
@@ -209,6 +211,30 @@ def train_model(
     )
     if validate_every_epochs <= 0 or save_every_epochs <= 0:
         raise ValueError("validation/save epoch intervals must be positive")
+    if not 0.0 <= reverse_pair_prob <= 1.0:
+        raise ValueError("reverse_pair_prob must be in [0, 1]")
+    train_dataset = getattr(train_loader, "dataset", None)
+    loader_bidirectional = bool(
+        getattr(train_dataset, "include_bidirectional_pairs", False)
+    )
+    loader_reverse_prob = float(getattr(train_dataset, "reverse_pair_prob", 0.0))
+    if loader_bidirectional and not use_bidirectional_training:
+        raise ValueError(
+            "The training loader contains bidirectional pairs. Set "
+            "use_bidirectional_training=True in TRAIN_AGGING_MODEL."
+        )
+    if use_bidirectional_training and not loader_bidirectional:
+        raise ValueError(
+            "use_bidirectional_training=True requires a training loader built with "
+            "include_bidirectional_pairs=True."
+        )
+    if use_bidirectional_training and not math.isclose(
+        loader_reverse_prob, float(reverse_pair_prob), rel_tol=0.0, abs_tol=1e-12
+    ):
+        raise ValueError(
+            "reverse_pair_prob must match between the training loader and "
+            f"TRAIN_AGGING_MODEL (loader={loader_reverse_prob}, training={reverse_pair_prob})."
+        )
     validate_prompt_policy(target_prompt_policy, generic_prompt_prob, numeric_prompt_prob)
     if monitoring_image is not None and checkpoint_dir is None and monitoring_dir is None:
         raise ValueError("Built-in monitoring requires monitoring_dir or checkpoint_dir")
@@ -349,6 +375,9 @@ def train_model(
         "use_small_delta_weighting": loss_fn.use_small_delta_weighting,
         "small_delta_threshold": loss_fn.small_delta_threshold,
         "small_delta_weight": loss_fn.small_delta_weight,
+        "use_bidirectional_training": bool(use_bidirectional_training),
+        "include_bidirectional_pairs": loader_bidirectional,
+        "reverse_pair_prob": loader_reverse_prob,
         "warmup_ratio": warmup_ratio, "warmup_steps": warmup_steps, "min_lr_ratio": min_lr_ratio,
         "max_grad_norm": max_grad_norm,
         "conditioning_dropout_prob": conditioning_dropout_prob,
@@ -442,6 +471,11 @@ def train_model(
         f"(enabled={getattr(train_loader.dataset, 'include_zero_delta_pairs', False)}) | "
         f"weighting={loss_fn.use_small_delta_weighting} | threshold={loss_fn.small_delta_threshold:g} | "
         f"weight={loss_fn.small_delta_weight:g}"
+    )
+    print(
+        f" Direction    bidirectional={use_bidirectional_training} | "
+        f"reverse_probability={loader_reverse_prob:.2f} among non-self observations | "
+        "canonical forward index retained"
     )
     print(
         f" Sampling      timesteps={min_train_timestep}-{timestep_end} ({timestep_sampling}) | "

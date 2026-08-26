@@ -1,4 +1,4 @@
-"""PyTorch Dataset for supervised longitudinal forward aging."""
+"""PyTorch Dataset for supervised longitudinal age editing."""
 
 from __future__ import annotations
 
@@ -43,9 +43,12 @@ class FaceAgingDataset(Dataset):
     """Return real same-person image pairs with exact numeric ages.
 
     ``random_target`` has one item per source image that has an eligible older
-    target. Target choice and paired flipping are deterministic functions of
-    ``seed``, ``epoch`` and item index, which makes them independent of worker
-    scheduling. Call :meth:`set_epoch` before each training epoch to resample.
+    target. Target choice, optional pair reversal, and paired flipping are
+    deterministic functions of ``seed``, ``epoch`` and item index, which makes
+    them independent of worker scheduling. Bidirectional sampling never removes
+    canonical forward pairs or changes dataset length: it only swaps the order
+    in which a selected pair is observed. Call :meth:`set_epoch` before each
+    training epoch to resample.
     """
 
     def __init__(
@@ -62,6 +65,8 @@ class FaceAgingDataset(Dataset):
         horizontal_flip_prob: float = 0.0,
         include_zero_delta_pairs: bool = False,
         zero_delta_pair_prob: float = 0.20,
+        include_bidirectional_pairs: bool = False,
+        reverse_pair_prob: float = 0.20,
         seed: int = 42,
     ) -> None:
         if pair_strategy not in {"all", "random_target"}:
@@ -72,6 +77,8 @@ class FaceAgingDataset(Dataset):
             raise ValueError("horizontal_flip_prob must be in [0, 1]")
         if not 0.0 <= zero_delta_pair_prob <= 1.0:
             raise ValueError("zero_delta_pair_prob must be in [0, 1]")
+        if not 0.0 <= reverse_pair_prob <= 1.0:
+            raise ValueError("reverse_pair_prob must be in [0, 1]")
         self.root_dir = Path(root_dir).expanduser().resolve()
         self.manifest = list(manifest)
         self.image_size = image_size
@@ -81,6 +88,8 @@ class FaceAgingDataset(Dataset):
         self.horizontal_flip_prob = horizontal_flip_prob
         self.include_zero_delta_pairs = bool(include_zero_delta_pairs)
         self.zero_delta_pair_prob = float(zero_delta_pair_prob)
+        self.include_bidirectional_pairs = bool(include_bidirectional_pairs)
+        self.reverse_pair_prob = float(reverse_pair_prob)
         self.seed = seed
         # A shared tensor propagates set_epoch() to persistent DataLoader workers.
         self._shared_epoch = torch.zeros((), dtype=torch.int64).share_memory_()
@@ -131,6 +140,21 @@ class FaceAgingDataset(Dataset):
                 source_path=source.relative_path,
                 target_path=source.relative_path,
             )
+        if self.include_bidirectional_pairs:
+            reverse_draw = _stable_uint64(
+                self.seed, self.epoch, index, "reverse_pair"
+            ) / 2**64
+            if reverse_draw < self.reverse_pair_prob:
+                return PairRecord(
+                    person_id=pair.person_id,
+                    source_index=pair.target_index,
+                    target_index=pair.source_index,
+                    source_age=pair.target_age,
+                    target_age=pair.source_age,
+                    delta_age=-pair.delta_age,
+                    source_path=pair.target_path,
+                    target_path=pair.source_path,
+                )
         return pair
 
     def __getitem__(self, index: int) -> dict[str, Any]:

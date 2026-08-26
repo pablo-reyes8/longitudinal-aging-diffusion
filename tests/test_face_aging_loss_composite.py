@@ -233,6 +233,24 @@ def test_exact_predicted_delta_has_zero_relative_loss_and_branch_can_be_disabled
     assert torch.equal(disabled_output["loss"], zero_output["loss"])
 
 
+def test_relative_age_loss_preserves_negative_rejuvenation_target():
+    loss_fn = make_loss(
+        identity_weight=0,
+        age_weight=0,
+        use_relative_age_loss=True,
+        relative_age_weight=0.05,
+        relative_age_loss_type="l1",
+    )
+    inputs = make_inputs(loss_fn, batch=1)
+    inputs["source_ages"] = torch.tensor([50.0])
+    inputs["target_ages"] = torch.tensor([30.0])
+    inputs["delta_ages"] = torch.tensor([-20.0])
+    output = loss_fn(**inputs, return_per_sample=True)
+    assert output["metrics"]["target_delta_age_mean"] == -20.0
+    assert output["loss_relative_age_per_sample"].shape == (1,)
+    assert torch.isfinite(output["loss_relative_age"])
+
+
 def test_per_sample_reduction_duplicate_and_batch_size_invariance():
     loss_fn = make_loss(identity_weight=0, age_weight=0)
     single = make_inputs(loss_fn, batch=1)

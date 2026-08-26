@@ -44,6 +44,8 @@ def build_face_aging_dataloaders(
     horizontal_flip_prob: float = 0.0,
     include_zero_delta_pairs: bool = False,
     zero_delta_pair_prob: float = 0.20,
+    include_bidirectional_pairs: bool = False,
+    reverse_pair_prob: float = 0.20,
     manifest_path: str | Path | None = None,
     split_path: str | Path | None = None,
     use_cached_manifest: bool = True,
@@ -94,6 +96,10 @@ def build_face_aging_dataloaders(
             horizontal_flip_prob=flip_prob,
             include_zero_delta_pairs=include_zero_delta_pairs if split == "train" else False,
             zero_delta_pair_prob=zero_delta_pair_prob,
+            include_bidirectional_pairs=(
+                include_bidirectional_pairs if split == "train" else False
+            ),
+            reverse_pair_prob=reverse_pair_prob,
             seed=seed + split_index,
         )
         datasets[split] = dataset
@@ -134,6 +140,8 @@ def build_face_aging_dataloaders(
             "prompt_style": prompt_style,
             "include_zero_delta_pairs": bool(include_zero_delta_pairs),
             "zero_delta_pair_prob": float(zero_delta_pair_prob),
+            "include_bidirectional_pairs": bool(include_bidirectional_pairs),
+            "reverse_pair_prob": float(reverse_pair_prob),
         },
     })
     return loaders, metadata

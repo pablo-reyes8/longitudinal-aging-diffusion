@@ -106,3 +106,25 @@ def test_loader_injects_zero_delta_only_into_training_split(tiny_root: Path):
         assert metadata["datasets"][split].include_zero_delta_pairs is False
     assert metadata["config"]["include_zero_delta_pairs"] is True
     assert metadata["config"]["zero_delta_pair_prob"] == 1.0
+
+
+def test_loader_bidirectional_sampling_is_training_only_and_reported(tiny_root: Path):
+    loaders, metadata = build_face_aging_dataloaders(
+        tiny_root,
+        batch_size=64,
+        num_workers=0,
+        train_shuffle=False,
+        train_drop_last=False,
+        include_bidirectional_pairs=True,
+        reverse_pair_prob=1.0,
+    )
+    assert torch.all(next(iter(loaders["train"]))["delta_age"] < 0)
+    assert loaders["train"].dataset.include_bidirectional_pairs is True
+    for split in ("val", "test"):
+        assert loaders[split].dataset.include_bidirectional_pairs is False
+        assert all(pair.delta_age > 0 for pair in loaders[split].dataset.all_pairs)
+    assert metadata["config"]["include_bidirectional_pairs"] is True
+    assert metadata["config"]["reverse_pair_prob"] == 1.0
+    direction = metadata["sampling_stats"]["direction"]
+    assert direction["reverse_fraction"] == 1.0
+    assert direction["forward_fraction"] == direction["zero_fraction"] == 0.0

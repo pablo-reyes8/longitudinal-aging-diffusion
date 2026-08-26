@@ -185,3 +185,104 @@ def test_zero_delta_probability_validation(tmp_path: Path, probability: float):
     write_image(tmp_path / "id_a" / "30.png")
     with pytest.raises(ValueError, match="zero_delta_pair_prob"):
         _dataset(tmp_path, zero_delta_pair_prob=probability)
+
+
+def test_bidirectional_probability_one_swaps_complete_pair_contract(tmp_path: Path):
+    write_image(tmp_path / "id_a" / "20.png", color=(20, 40, 60))
+    write_image(tmp_path / "id_a" / "50.png", color=(50, 100, 150))
+    dataset = _dataset(
+        tmp_path,
+        image_size=16,
+        include_bidirectional_pairs=True,
+        reverse_pair_prob=1.0,
+    )
+    assert len(dataset.all_pairs) == len(dataset) == 1
+    assert dataset.all_pairs[0].delta_age == 30  # canonical index is unchanged
+    sample = dataset[0]
+    assert sample["source_age"] == 50
+    assert sample["target_age"] == 20
+    assert sample["delta_age"] == -30
+    assert sample["source_filename"] == "50.png"
+    assert sample["target_filename"] == "20.png"
+    assert "50-year-old" in sample["source_prompt"]
+    assert "20-year-old" in sample["target_prompt"]
+    assert sample["person_id"] == "id_a"
+    assert not torch.equal(sample["source_image"], sample["target_image"])
+
+
+def test_bidirectional_disabled_and_probability_zero_are_exactly_forward(tmp_path: Path):
+    for age in (20, 30, 40, 50, 60):
+        write_image(tmp_path / "id_a" / f"{age}.png")
+    disabled = _dataset(tmp_path, pair_strategy="random_target", seed=123)
+    probability_zero = _dataset(
+        tmp_path,
+        pair_strategy="random_target",
+        seed=123,
+        include_bidirectional_pairs=True,
+        reverse_pair_prob=0.0,
+    )
+    for epoch in range(20):
+        disabled.set_epoch(epoch)
+        probability_zero.set_epoch(epoch)
+        assert [disabled.pair_for_index(i) for i in range(len(disabled))] == [
+            probability_zero.pair_for_index(i) for i in range(len(probability_zero))
+        ]
+
+
+def test_bidirectional_sampling_is_deterministic_and_does_not_shrink_dataset(tmp_path: Path):
+    for age in (20, 30, 40, 50, 60):
+        write_image(tmp_path / "id_a" / f"{age}.png")
+    datasets = [
+        _dataset(
+            tmp_path,
+            pair_strategy="random_target",
+            include_bidirectional_pairs=True,
+            reverse_pair_prob=0.20,
+            seed=321,
+        )
+        for _ in range(2)
+    ]
+    assert all(len(dataset) == len(dataset._source_candidates) for dataset in datasets)
+    observations = []
+    for dataset in datasets:
+        signed_deltas = []
+        for draw in range(10_000):
+            dataset.set_epoch(draw // len(dataset))
+            signed_deltas.append(dataset.pair_for_index(draw % len(dataset)).delta_age)
+        observations.append(signed_deltas)
+    assert observations[0] == observations[1]
+    reverse_fraction = sum(delta < 0 for delta in observations[0]) / len(observations[0])
+    assert reverse_fraction == pytest.approx(0.20, abs=0.02)
+    assert all(delta != 0 for delta in observations[0])
+
+
+def test_zero_pairs_are_not_reversed_and_direction_mix_is_independent(tmp_path: Path):
+    for age in (20, 30, 40, 50, 60):
+        write_image(tmp_path / "id_a" / f"{age}.png")
+    dataset = _dataset(
+        tmp_path,
+        pair_strategy="random_target",
+        include_zero_delta_pairs=True,
+        zero_delta_pair_prob=0.20,
+        include_bidirectional_pairs=True,
+        reverse_pair_prob=0.25,
+        seed=77,
+    )
+    deltas = []
+    for draw in range(20_000):
+        dataset.set_epoch(draw // len(dataset))
+        pair = dataset.pair_for_index(draw % len(dataset))
+        deltas.append(pair.delta_age)
+        if pair.delta_age == 0:
+            assert pair.source_index == pair.target_index
+    assert sum(delta == 0 for delta in deltas) / len(deltas) == pytest.approx(0.20, abs=0.02)
+    nonzero = [delta for delta in deltas if delta != 0]
+    assert sum(delta < 0 for delta in nonzero) / len(nonzero) == pytest.approx(0.25, abs=0.02)
+
+
+@pytest.mark.parametrize("probability", (-0.01, 1.01))
+def test_reverse_pair_probability_validation(tmp_path: Path, probability: float):
+    write_image(tmp_path / "id_a" / "20.png")
+    write_image(tmp_path / "id_a" / "30.png")
+    with pytest.raises(ValueError, match="reverse_pair_prob"):
+        _dataset(tmp_path, reverse_pair_prob=probability)

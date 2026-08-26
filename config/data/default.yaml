@@ -13,6 +13,10 @@ dynamic_person_word: false
 horizontal_flip_prob: 0.2
 include_zero_delta_pairs: true
 zero_delta_pair_prob: 0.20
+# Retains the complete forward pair index and reverses this fraction of
+# non-self training observations on the fly.
+include_bidirectional_pairs: true
+reverse_pair_prob: 0.20
 normalize_over_100: true
 pin_memory: true
 persistent_workers: true

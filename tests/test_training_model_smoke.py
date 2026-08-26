@@ -15,6 +15,8 @@ def test_train_agging_model_real_loader_mixed_precision_checkpoint_and_validatio
     loaders, _ = build_face_aging_dataloaders(
         tiny_root, image_size=32, batch_size=2, num_workers=0,
         train_drop_last=False, train_shuffle=False,
+        include_zero_delta_pairs=True, zero_delta_pair_prob=0.20,
+        include_bidirectional_pairs=True, reverse_pair_prob=0.20,
     )
     bundle = make_training_bundle(seed=990)
     loss_fn = make_training_loss(bundle)
@@ -39,6 +41,7 @@ def test_train_agging_model_real_loader_mixed_precision_checkpoint_and_validatio
         min_snr_gamma=5.0, checkpoint_dir=tmp_path / "checkpoints",
         log_every=0, sample_every_epochs=0,
         sample_target_posterior=False, deterministic=True,
+        use_bidirectional_training=True, reverse_pair_prob=0.20,
     )
     assert result["optimizer_step"] == 2
     assert result["precision"]["amp_dtype_name"] == "bf16" and result["scaler"] is None
@@ -53,6 +56,17 @@ def test_train_agging_model_real_loader_mixed_precision_checkpoint_and_validatio
     assert train_metrics["train/numeric_prompt_count"] + train_metrics["train/generic_prompt_count"] == 8
     assert train_metrics["train/numeric_prompt_fraction"] + train_metrics["train/generic_prompt_fraction"] == pytest.approx(1.0)
     assert "train/age_conditioner_scale" in train_metrics
+    assert train_metrics["train/forward_pair_count"] > 0
+    assert train_metrics["train/reverse_pair_count"] > 0
+    assert train_metrics["train/zero_pair_count"] > 0
+    assert sum(
+        train_metrics[key]
+        for key in (
+            "train/forward_pair_fraction",
+            "train/reverse_pair_fraction",
+            "train/zero_pair_fraction",
+        )
+    ) == pytest.approx(1.0)
     assert result["memory_features"] == {"gradient_checkpointing": "unavailable", "xformers": "unavailable"}
     changed = {name for name, p in bundle["unet"].named_parameters() if p.requires_grad and not torch.equal(p, trainable[name])}
     assert any(name.startswith("conv_in") for name in changed)
@@ -70,6 +84,10 @@ def test_train_agging_model_real_loader_mixed_precision_checkpoint_and_validatio
     history = json.loads((root / "history.json").read_text())
     assert history["optimizer_step"] if "optimizer_step" in history else result["optimizer_step"] == 2
     inference = torch.load(root / "latest" / "adapter_inference.pt", weights_only=True)
+    resume_payload = torch.load(root / "latest" / "training_resume.pt", weights_only=False)
+    assert resume_payload["training_config"]["use_bidirectional_training"] is True
+    assert resume_payload["training_config"]["include_bidirectional_pairs"] is True
+    assert resume_payload["training_config"]["reverse_pair_prob"] == 0.20
     assert set(inference["adapter_state_dict"]) == set(bundle["trainable_param_names"])
     assert inference["model_id"] == bundle["model_id"]
     reloaded_bundle = make_training_bundle(seed=991)

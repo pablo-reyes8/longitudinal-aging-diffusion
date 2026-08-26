@@ -66,6 +66,15 @@ def test_age_conditioner_v2_fourier_shapes_determinism_and_age_sensitivity():
         conditioner(torch.tensor([20.0]), torch.tensor([30.0]), torch.tensor([10.0])),
         conditioner(torch.tensor([40.0]), torch.tensor([50.0]), torch.tensor([10.0])),
     )
+    signed = conditioner(
+        torch.tensor([40.0, 40.0, 40.0]),
+        torch.tensor([60.0, 40.0, 20.0]),
+        torch.tensor([20.0, 0.0, -20.0]),
+    )
+    assert signed.shape == (3, 64) and torch.isfinite(signed).all()
+    assert not torch.equal(signed[0], signed[1])
+    assert not torch.equal(signed[0], signed[2])
+    assert not torch.equal(signed[1], signed[2])
 
 
 def test_age_conditioner_v2_gate_is_trainable_and_zero_recovers_base_timestep_path():

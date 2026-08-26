@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-EE4C2C?logo=pytorch&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Tests](https://img.shields.io/badge/tests-233%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-246%20passed-brightgreen)
 
 Supervised photo aging from real longitudinal observations. The project adapts
 Stable Diffusion 1.5 with source-image conditioning, explicit absolute/relative
@@ -140,6 +140,11 @@ numeric target-age prompts with 30% generic aging prompts. It loads frozen
 baseline injects 20% train-only self-pairs, adds decoded L1 preservation with
 weight `0.10` for `|delta_age| <= 2`, and weights diffusion samples `2x` for
 `|delta_age| <= 5`. Validation and test retain only real longitudinal pairs.
+Bidirectional training is enabled in both baseline YAMLs: every canonical
+forward pair remains available, while 20% of non-self observations are shown in
+reverse order (`delta_age < 0`). This is an ordering augmentation, not an 80%
+subsample of the aging data. The loader and trainer flags and probabilities
+must agree, otherwise training stops before allocating the model on the device.
 To control VRAM, the ArcFace and MiVOLO losses run every fourth training
 microbatch on 25% of eligible samples and use
 activation checkpointing through the VAE and auxiliary networks. See
@@ -159,6 +164,9 @@ When ArcFace and MiVOLO are attached, monitoring also annotates the grid with
 target age, predicted age, and source/generated identity cosine. Each epoch
 writes `sampling_diagnostics_epoch_NNN.csv`, while
 `monitoring/sampling_diagnostics_history.csv` appends the complete trajectory.
+The same sweep now fits predicted age delta against requested age delta and
+prints `Age calibration | intercept=... | slope=... | R2=...`. Those three
+values are saved in both diagnostic CSVs without any additional inference pass.
 
 Resume exactly from a training checkpoint with:
 
@@ -214,6 +222,7 @@ from src.inference import infer_face_aging
 loaders, metadata = build_face_aging_dataloaders(
     "/path/to/dataset_root", image_size=256, batch_size=4,
     include_zero_delta_pairs=True, zero_delta_pair_prob=0.20,
+    include_bidirectional_pairs=True, reverse_pair_prob=0.20,
 )
 
 result = infer_face_aging(

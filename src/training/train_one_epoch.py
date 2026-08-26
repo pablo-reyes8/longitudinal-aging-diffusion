@@ -188,13 +188,14 @@ def train_one_epoch(
     processed_batches = processed_samples = skipped_nonfinite = skipped_updates = double_prompt_batches = 0
     numeric_prompt_count = generic_prompt_count = 0
     preservation_sample_count = small_delta_sample_count = 0
+    forward_pair_count = reverse_pair_count = zero_pair_count = 0
     consecutive_nonfinite = 0
     start = time.perf_counter()
     if log_every:
         print(f" Epoch {epoch + 1:02d} - training progress")
         print(
             "   batch       done    opt.step   total     diffusion  identity  age.abs  age.rel  "
-            "preserve  active   smallΔ   generic  age.gate  grad     LoRA lr    samples/s   ETA"
+            "preserve  active   smallΔ   forward  reverse  zero     generic  age.gate  grad     LoRA lr    samples/s   ETA"
         )
     while processed_batches < total_batches:
         if max_optimizer_steps is not None and optimizer_step >= max_optimizer_steps:
@@ -263,6 +264,13 @@ def train_one_epoch(
                     _backward(second_out["loss"] * (micro_weight * second_weight), scaler)
                     double_prompt_batches += 1
             if not window_failed:
+                deltas = batch["delta_age"].detach()
+                batch_forward = int((deltas > 0).sum().item())
+                batch_reverse = int((deltas < 0).sum().item())
+                batch_zero = int((deltas == 0).sum().item())
+                forward_pair_count += batch_forward
+                reverse_pair_count += batch_reverse
+                zero_pair_count += batch_zero
                 component_values = _component_values(first_out, second_out, first_weight, second_weight)
                 tracker.update(component_values, weight=batch_samples)
                 tracker.update(first["diagnostics"], weight=batch_samples)
@@ -271,6 +279,11 @@ def train_one_epoch(
                     "generic_prompt_fraction": prompt_selection["generic_fraction"],
                 }, weight=batch_samples)
                 tracker.update({"double_prompt_fraction": float(use_double)}, weight=batch_samples)
+                tracker.update({
+                    "forward_pair_fraction": batch_forward / batch_samples,
+                    "reverse_pair_fraction": batch_reverse / batch_samples,
+                    "zero_pair_fraction": batch_zero / batch_samples,
+                }, weight=batch_samples)
                 _update_gap_metrics(tracker, batch, first_out, loss_fn)
                 step_timesteps = first["prepared"]["timesteps"].detach().cpu().double()
                 timestep_count += step_timesteps.numel()
@@ -321,6 +334,9 @@ def train_one_epoch(
                 f"{current.get('loss_preservation', float('nan')):8.4f}  "
                 f"{current.get('preservation_active_fraction', float('nan')):6.1%}  "
                 f"{current.get('small_delta_fraction', float('nan')):6.1%}  "
+                f"{current.get('forward_pair_fraction', float('nan')):7.1%}  "
+                f"{current.get('reverse_pair_fraction', float('nan')):7.1%}  "
+                f"{current.get('zero_pair_fraction', float('nan')):7.1%}  "
                 f"{current.get('generic_prompt_fraction', float('nan')):7.1%}  "
                 f"{current.get('age_conditioner_scale', float('nan')):8.3f}  "
                 f"{current.get('grad_norm', float('nan')):7.3f}  "
@@ -349,6 +365,12 @@ def train_one_epoch(
         "train/generic_prompt_fraction": generic_prompt_count / max(1, numeric_prompt_count + generic_prompt_count),
         "train/num_preservation_samples": float(preservation_sample_count),
         "train/num_small_delta_samples": float(small_delta_sample_count),
+        "train/forward_pair_count": float(forward_pair_count),
+        "train/reverse_pair_count": float(reverse_pair_count),
+        "train/zero_pair_count": float(zero_pair_count),
+        "train/forward_pair_fraction": forward_pair_count / max(1, forward_pair_count + reverse_pair_count + zero_pair_count),
+        "train/reverse_pair_fraction": reverse_pair_count / max(1, forward_pair_count + reverse_pair_count + zero_pair_count),
+        "train/zero_pair_fraction": zero_pair_count / max(1, forward_pair_count + reverse_pair_count + zero_pair_count),
     })
     return {
         "metrics": metrics,

@@ -26,3 +26,8 @@ to use semantic versioning after its first stable release.
 - Train-only zero-delta self-pair injection, decoded source-preservation loss,
   and binary small-delta diffusion weighting with checkpointed configuration
   and activation metrics.
+- Optional deterministic bidirectional longitudinal sampling that preserves the
+  complete canonical forward-pair index while presenting a configurable share
+  in reverse order, plus strict loader/trainer guards and direction metrics.
+- Per-epoch age-response intercept, slope, and R² calibration computed from the
+  existing MiVOLO monitoring sweep and persisted in diagnostic history CSVs.

@@ -144,6 +144,10 @@ def _sampling_diagnostic(dataset: "FaceAgingDataset" | None, n_samples: int) -> 
         return {
             "samples": 0, "top_identities": [], "identity_concentration": _shares([]),
             "source_age": _describe([]), "target_age": _describe([]), "delta_age": _describe([]),
+            "direction": {
+                "forward_count": 0, "reverse_count": 0, "zero_count": 0,
+                "forward_fraction": 0.0, "reverse_fraction": 0.0, "zero_fraction": 0.0,
+            },
         }
     original_epoch = dataset.epoch
     identities: Counter[str] = Counter()
@@ -158,6 +162,9 @@ def _sampling_diagnostic(dataset: "FaceAgingDataset" | None, n_samples: int) -> 
         target_ages.append(pair.target_age)
         deltas.append(pair.delta_age)
     dataset.set_epoch(original_epoch)
+    forward_count = sum(delta > 0 for delta in deltas)
+    reverse_count = sum(delta < 0 for delta in deltas)
+    zero_count = sum(delta == 0 for delta in deltas)
     return {
         "samples": n_samples,
         "top_identities": identities.most_common(10),
@@ -165,6 +172,14 @@ def _sampling_diagnostic(dataset: "FaceAgingDataset" | None, n_samples: int) -> 
         "source_age": _describe(source_ages),
         "target_age": _describe(target_ages),
         "delta_age": {**_describe(deltas), "bands": _band_counts(deltas, DELTA_BANDS)},
+        "direction": {
+            "forward_count": forward_count,
+            "reverse_count": reverse_count,
+            "zero_count": zero_count,
+            "forward_fraction": forward_count / n_samples,
+            "reverse_fraction": reverse_count / n_samples,
+            "zero_fraction": zero_count / n_samples,
+        },
     }
 
 

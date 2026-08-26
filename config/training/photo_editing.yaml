@@ -22,6 +22,10 @@ preservation_max_delta: 2
 use_small_delta_weighting: true
 small_delta_threshold: 5
 small_delta_weight: 2.0
+# Must agree with the training loader. 0.20 means an 80/20 forward/reverse
+# ordering among non-self observations; it does not truncate forward pairs.
+use_bidirectional_training: true
+reverse_pair_prob: 0.20
 warmup_ratio: 0.05
 min_lr_ratio: 0.10
 grad_accum_steps: 4

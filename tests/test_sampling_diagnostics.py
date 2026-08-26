@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 import torch
 from PIL import Image
 from torch import nn
@@ -12,7 +13,11 @@ from src.inference import (
     infer_face_aging_direct,
 )
 from src.loss import AgeEstimatorAdapter, IdentityEncoderAdapter
-from src.training import atomic_torch_save, build_inference_payload
+from src.training import (
+    atomic_torch_save,
+    build_inference_payload,
+    fit_age_response_calibration,
+)
 from src.training.sampling_monitor import run_face_aging_monitor
 from training_fakes import make_training_bundle
 
@@ -72,7 +77,7 @@ def test_inference_diagnostics_do_not_change_generated_output():
     }
 
 
-def test_training_sweep_writes_epoch_rows_and_appends_history(tmp_path):
+def test_training_sweep_writes_epoch_rows_appends_history_and_calibration(tmp_path, capsys):
     bundle = attach_diagnostics(make_training_bundle(seed=881))
     image = Image.new("RGB", (38, 32), (110, 75, 55))
     for epoch in (0, 1):
@@ -85,10 +90,63 @@ def test_training_sweep_writes_epoch_rows_and_appends_history(tmp_path):
         frame = pd.read_csv(epoch_csv)
         assert len(frame) == 3
         assert frame["target_age"].tolist() == [30.0, 50.0, 65.0]
+        assert frame["age_calibration_intercept"].nunique() == 1
+        assert frame["age_calibration_slope"].nunique() == 1
+        assert frame["age_calibration_r2"].nunique() == 1
+        assert report["age_calibration"] is not None
         assert report["diagnostics_csv"] == str(epoch_csv)
     history = pd.read_csv(tmp_path / "sampling_diagnostics_history.csv")
     assert len(history) == 6
     assert history.groupby("epoch").size().to_dict() == {1: 3, 2: 3}
+    printed = capsys.readouterr().out
+    assert printed.count("Age calibration | intercept=") == 2
+
+
+def test_age_response_calibration_exact_linear_oracle_and_edge_cases():
+    rows = [
+        {"target_delta_age": x, "predicted_delta_age": 3.0 + 1.25 * x}
+        for x in (-20, 0, 10, 40)
+    ]
+    calibration = fit_age_response_calibration(rows)
+    assert calibration == pytest.approx({
+        "age_calibration_intercept": 3.0,
+        "age_calibration_slope": 1.25,
+        "age_calibration_r2": 1.0,
+    })
+    assert fit_age_response_calibration(rows[:1]) is None
+    assert fit_age_response_calibration([
+        {"target_delta_age": 5, "predicted_delta_age": 1},
+        {"target_delta_age": 5, "predicted_delta_age": 2},
+    ]) is None
+
+
+def test_monitoring_history_migrates_old_csv_schema(tmp_path):
+    history_path = tmp_path / "sampling_diagnostics_history.csv"
+    history_path.write_text(
+        "epoch,source_age,target_age,target_delta_age,predicted_delta_age\n"
+        "1,25,30,5,4\n",
+        encoding="utf-8",
+    )
+    bundle = attach_diagnostics(make_training_bundle(seed=889))
+    report = run_face_aging_monitor(
+        bundle=bundle,
+        image=Image.new("RGB", (38, 32), (110, 75, 55)),
+        epoch=1,
+        output_dir=tmp_path,
+        target_age=[30, 50, 65],
+        source_age=25,
+        num_inference_steps=2,
+        strength=0.5,
+        image_size=32,
+    )
+    history = pd.read_csv(history_path)
+    assert list(history.columns)[-3:] == [
+        "age_calibration_intercept",
+        "age_calibration_slope",
+        "age_calibration_r2",
+    ]
+    assert len(history) == 4
+    assert report["age_calibration"] is not None
 
 
 def test_checkpoint_diagnostic_age_error_and_generation_match_normal_inference(tmp_path):
