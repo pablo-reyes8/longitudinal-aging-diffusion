@@ -38,6 +38,9 @@ def test_all_default_yaml_configs_are_mappings_and_model_dtype_is_resolved():
     training = load_yaml("config/training/photo_editing.yaml")
     assert data["include_zero_delta_pairs"] is True
     assert data["zero_delta_pair_prob"] == 0.20
+    assert data["include_kaggle"] is False
+    assert data["kaggle_proportion"] == 0.40
+    assert data["kaggle_reverse_pair_prob"] == 0.50
     assert training["loss"]["use_preservation_loss"] is True
     assert training["loss"]["preservation_weight"] == 0.10
     assert training["loss"]["preservation_max_delta"] == 2

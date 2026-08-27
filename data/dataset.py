@@ -67,6 +67,7 @@ class FaceAgingDataset(Dataset):
         zero_delta_pair_prob: float = 0.20,
         include_bidirectional_pairs: bool = False,
         reverse_pair_prob: float = 0.20,
+        pair_records: Sequence[PairRecord] | None = None,
         seed: int = 42,
     ) -> None:
         if pair_strategy not in {"all", "random_target"}:
@@ -93,7 +94,7 @@ class FaceAgingDataset(Dataset):
         self.seed = seed
         # A shared tensor propagates set_epoch() to persistent DataLoader workers.
         self._shared_epoch = torch.zeros((), dtype=torch.int64).share_memory_()
-        self.all_pairs = build_pair_index(
+        self.all_pairs = list(pair_records) if pair_records is not None else build_pair_index(
             self.manifest, min_age_gap=min_age_gap, max_age_gap=max_age_gap
         )
         candidates: dict[int, list[PairRecord]] = {}
@@ -188,6 +189,56 @@ class FaceAgingDataset(Dataset):
             "target_filename": target.filename,
             "gender": source.gender,
         }
+
+
+class CombinedFaceAgingDataset(Dataset):
+    """Concatenate primary and complementary sources without dropping primary items."""
+
+    def __init__(self, primary: FaceAgingDataset, complementary: FaceAgingDataset) -> None:
+        self.primary = primary
+        self.complementary = complementary
+        self.primary_observations = len(primary)
+        self.complementary_observations = len(complementary)
+        self.manifest = [*primary.manifest, *complementary.manifest]
+        # Preserve the canonical primary index for existing audits. The
+        # complementary index uses a different root and is exposed separately.
+        self.all_pairs = primary.all_pairs
+        self.complementary_pairs = complementary.all_pairs
+        self.include_zero_delta_pairs = primary.include_zero_delta_pairs
+        self.zero_delta_pair_prob = primary.zero_delta_pair_prob
+        self.include_bidirectional_pairs = primary.include_bidirectional_pairs
+        self.reverse_pair_prob = primary.reverse_pair_prob
+        self.kaggle_reverse_pair_prob = complementary.reverse_pair_prob
+        self.training_identity_count = (
+            len({row.person_id for row in primary.manifest})
+            + len({pair.person_id for pair in complementary.all_pairs})
+        )
+        self.pair_strategy = "combined"
+
+    def __len__(self) -> int:
+        return self.primary_observations + self.complementary_observations
+
+    def set_epoch(self, epoch: int) -> None:
+        self.primary.set_epoch(epoch)
+        self.complementary.set_epoch(epoch)
+
+    @property
+    def epoch(self) -> int:
+        return self.primary.epoch
+
+    def pair_for_index(self, index: int) -> PairRecord:
+        if index < self.primary_observations:
+            return self.primary.pair_for_index(index)
+        return self.complementary.pair_for_index(index - self.primary_observations)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        if index < self.primary_observations:
+            sample = self.primary[index]
+            source_dataset = "colombian"
+        else:
+            sample = self.complementary[index - self.primary_observations]
+            source_dataset = "fgnet"
+        return {**sample, "source_dataset": source_dataset}
 
 
 def collate_face_aging_batch(samples: list[dict[str, Any]]) -> dict[str, Any]:

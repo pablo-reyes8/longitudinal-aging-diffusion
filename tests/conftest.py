@@ -24,3 +24,15 @@ def tiny_root(tmp_path: Path) -> Path:
         for age in (10 + person_index, 20 + person_index, 30 + person_index):
             write_image(person / f"{age}.png", color=(age, 2 * age, 3 * age))
     return tmp_path
+
+
+@pytest.fixture
+def tiny_fgnet_root(tmp_path: Path) -> Path:
+    root = tmp_path / "fgnet_flat"
+    filenames = (
+        "001A02.JPG", "001A05.JPG", "001A43a.JPG", "001A43b.JPG",
+        "002A03.JPG", "002A10.JPG", "002A38.JPG",
+    )
+    for index, filename in enumerate(filenames):
+        write_image(root / filename, color=(20 + index, 40 + index, 60 + index))
+    return root

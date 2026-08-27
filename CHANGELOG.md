@@ -31,3 +31,6 @@ to use semantic versioning after its first stable release.
   in reverse order, plus strict loader/trainer guards and direction metrics.
 - Per-epoch age-response intercept, slope, and R² calibration computed from the
   existing MiVOLO monitoring sweep and persisted in diagnostic history CSVs.
+- Optional FG-NET complementary source with strict filename parsing, unchanged
+  Colombian coverage, scarcity-aware transition selection, identity balancing,
+  and stronger configurable reverse-pair exposure.

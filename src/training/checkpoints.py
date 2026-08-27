@@ -38,6 +38,8 @@ PROTECTED_TRAINING_KEYS = (
     "small_delta_threshold", "small_delta_weight",
     "include_zero_delta_pairs", "zero_delta_pair_prob",
     "use_bidirectional_training", "include_bidirectional_pairs", "reverse_pair_prob",
+    "include_kaggle", "kaggle_proportion", "kaggle_available_pairs",
+    "kaggle_selected_pairs", "kaggle_reverse_pair_prob",
     "target_prompt_policy", "generic_prompt_prob", "numeric_prompt_prob",
 )
 V2_ONLY_BUNDLE_KEYS = {

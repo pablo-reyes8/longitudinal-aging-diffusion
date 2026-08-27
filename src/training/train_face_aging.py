@@ -90,7 +90,11 @@ def _world_size() -> int:
 
 
 def _dataset_identity_count(loader) -> int | None:
-    manifest = getattr(getattr(loader, "dataset", None), "manifest", None)
+    dataset = getattr(loader, "dataset", None)
+    explicit_count = getattr(dataset, "training_identity_count", None)
+    if explicit_count is not None:
+        return int(explicit_count)
+    manifest = getattr(dataset, "manifest", None)
     if manifest is None:
         return None
     return len({record.person_id for record in manifest})
@@ -378,6 +382,13 @@ def train_model(
         "use_bidirectional_training": bool(use_bidirectional_training),
         "include_bidirectional_pairs": loader_bidirectional,
         "reverse_pair_prob": loader_reverse_prob,
+        "include_kaggle": bool(getattr(train_dataset, "include_kaggle", False)),
+        "kaggle_proportion": float(getattr(train_dataset, "kaggle_proportion", 0.0)),
+        "kaggle_available_pairs": int(getattr(train_dataset, "kaggle_available_pairs", 0)),
+        "kaggle_selected_pairs": int(getattr(train_dataset, "kaggle_selected_pairs", 0)),
+        "kaggle_reverse_pair_prob": float(
+            getattr(train_dataset, "kaggle_reverse_pair_prob", 0.0)
+        ),
         "warmup_ratio": warmup_ratio, "warmup_steps": warmup_steps, "min_lr_ratio": min_lr_ratio,
         "max_grad_norm": max_grad_norm,
         "conditioning_dropout_prob": conditioning_dropout_prob,
@@ -476,6 +487,12 @@ def train_model(
         f" Direction    bidirectional={use_bidirectional_training} | "
         f"reverse_probability={loader_reverse_prob:.2f} among non-self observations | "
         "canonical forward index retained"
+    )
+    print(
+        f" Data mix     Colombian={getattr(train_dataset, 'primary_observations', len(train_dataset)):,} | "
+        f"FG-NET={getattr(train_dataset, 'complementary_observations', 0):,} "
+        f"(available={getattr(train_dataset, 'kaggle_available_pairs', 0):,}, "
+        f"reverse_prob={getattr(train_dataset, 'kaggle_reverse_pair_prob', 0.0):.2f})"
     )
     print(
         f" Sampling      timesteps={min_train_timestep}-{timestep_end} ({timestep_sampling}) | "

@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-EE4C2C?logo=pytorch&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Tests](https://img.shields.io/badge/tests-246%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-257%20passed-brightgreen)
 
 Supervised photo aging from real longitudinal observations. The project adapts
 Stable Diffusion 1.5 with source-image conditioning, explicit absolute/relative
@@ -145,6 +145,14 @@ forward pair remains available, while 20% of non-self observations are shown in
 reverse order (`delta_age < 0`). This is an ordering augmentation, not an 80%
 subsample of the aging data. The loader and trainer flags and probabilities
 must agree, otherwise training stops before allocating the model on the device.
+FG-NET can optionally complement training through `include_kaggle=True` and a
+flat images path. For proportions below `1.0`, the loader adds
+`kaggle_proportion × Colombian epoch observations` and never removes Colombian
+items. Selection fills source/target/gap cells that are scarce in the Colombian
+profile before common cells, balances FG-NET identities, and defaults to 50%
+reverse ordering. The special proportion `1.0` uses every eligible FG-NET pair.
+Validation and test remain Colombian. Every loader build prints primary,
+available FG-NET, selected FG-NET, and combined pair counts.
 To control VRAM, the ArcFace and MiVOLO losses run every fourth training
 microbatch on 25% of eligible samples and use
 activation checkpointing through the VAE and auxiliary networks. See
@@ -223,6 +231,8 @@ loaders, metadata = build_face_aging_dataloaders(
     "/path/to/dataset_root", image_size=256, batch_size=4,
     include_zero_delta_pairs=True, zero_delta_pair_prob=0.20,
     include_bidirectional_pairs=True, reverse_pair_prob=0.20,
+    include_kaggle=True, kaggle_path="/path/to/FGNET/images",
+    kaggle_proportion=0.40, kaggle_reverse_pair_prob=0.50,
 )
 
 result = infer_face_aging(
@@ -238,6 +248,7 @@ result = infer_face_aging(
 ```
 
 - [`notebooks/data_loader.ipynb`](notebooks/data_loader.ipynb): build and inspect loaders.
+- [`notebooks/kaggle_dataset.ipynb`](notebooks/kaggle_dataset.ipynb): audit FG-NET and preview complementary selection.
 - [`notebooks/model.ipynb`](notebooks/model.ipynb): load SD1.5 and verify trainable parameters.
 - [`notebooks/training.ipynb`](notebooks/training.ipynb): full server training workflow.
 - [`notebooks/inference.ipynb`](notebooks/inference.ipynb): checkpoint-to-image inference.

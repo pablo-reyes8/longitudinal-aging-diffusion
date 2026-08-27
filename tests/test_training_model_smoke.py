@@ -11,12 +11,14 @@ from src.training import TRAIN_AGGING_MODEL
 from training_fakes import clone_module_parameters, make_training_bundle, make_training_loss
 
 
-def test_train_agging_model_real_loader_mixed_precision_checkpoint_and_validation(tiny_root, tmp_path):
+def test_train_agging_model_real_loader_mixed_precision_checkpoint_and_validation(tiny_root, tiny_fgnet_root, tmp_path):
     loaders, _ = build_face_aging_dataloaders(
         tiny_root, image_size=32, batch_size=2, num_workers=0,
         train_drop_last=False, train_shuffle=False,
         include_zero_delta_pairs=True, zero_delta_pair_prob=0.20,
         include_bidirectional_pairs=True, reverse_pair_prob=0.20,
+        include_kaggle=True, kaggle_path=tiny_fgnet_root,
+        kaggle_proportion=0.40, kaggle_reverse_pair_prob=0.50,
     )
     bundle = make_training_bundle(seed=990)
     loss_fn = make_training_loss(bundle)
@@ -88,6 +90,10 @@ def test_train_agging_model_real_loader_mixed_precision_checkpoint_and_validatio
     assert resume_payload["training_config"]["use_bidirectional_training"] is True
     assert resume_payload["training_config"]["include_bidirectional_pairs"] is True
     assert resume_payload["training_config"]["reverse_pair_prob"] == 0.20
+    assert resume_payload["training_config"]["include_kaggle"] is True
+    assert resume_payload["training_config"]["kaggle_proportion"] == 0.40
+    assert resume_payload["training_config"]["kaggle_selected_pairs"] == 4
+    assert resume_payload["training_config"]["kaggle_reverse_pair_prob"] == 0.50
     assert set(inference["adapter_state_dict"]) == set(bundle["trainable_param_names"])
     assert inference["model_id"] == bundle["model_id"]
     reloaded_bundle = make_training_bundle(seed=991)

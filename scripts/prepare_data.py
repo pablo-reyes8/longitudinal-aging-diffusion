@@ -45,6 +45,7 @@ def run(args: argparse.Namespace) -> dict:
     )
     report["loader_batches"] = {name: len(loader) for name, loader in loaders.items()}
     report["dataset_items"] = {name: len(metadata["datasets"][name]) for name in loaders}
+    report["kaggle"] = metadata["kaggle"]
     report_path = save_json(report, output_dir / "validation_report.json")
     print(f"Data validation: {'PASSED' if report['passed'] else 'FAILED'}")
     print(f"Report: {report_path.resolve()}")

@@ -17,6 +17,12 @@ zero_delta_pair_prob: 0.20
 # non-self training observations on the fly.
 include_bidirectional_pairs: true
 reverse_pair_prob: 0.20
+# Optional FG-NET complement. A proportion below 1 adds that many selected
+# FG-NET observations relative to the intact Colombian epoch; 1 uses all pairs.
+include_kaggle: false
+kaggle_path: null
+kaggle_proportion: 0.40
+kaggle_reverse_pair_prob: 0.50
 normalize_over_100: true
 pin_memory: true
 persistent_workers: true

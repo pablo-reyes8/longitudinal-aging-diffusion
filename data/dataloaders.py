@@ -10,7 +10,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from .dataset import FaceAgingDataset, collate_face_aging_batch
+from .dataset import CombinedFaceAgingDataset, FaceAgingDataset, collate_face_aging_batch
+from .fgnet import (
+    build_fgnet_manifest,
+    select_complementary_fgnet_pairs,
+)
 from .indexing import (
     ImageRecord,
     build_identity_splits,
@@ -46,6 +50,10 @@ def build_face_aging_dataloaders(
     zero_delta_pair_prob: float = 0.20,
     include_bidirectional_pairs: bool = False,
     reverse_pair_prob: float = 0.20,
+    include_kaggle: bool = False,
+    kaggle_path: str | Path | None = None,
+    kaggle_proportion: float = 0.40,
+    kaggle_reverse_pair_prob: float = 0.50,
     manifest_path: str | Path | None = None,
     split_path: str | Path | None = None,
     use_cached_manifest: bool = True,
@@ -61,6 +69,12 @@ def build_face_aging_dataloaders(
     eval_drop_last: bool = False,
 ) -> tuple[dict[str, DataLoader], dict]:
     """Build all loaders from a single root path and return rich metadata."""
+    if not 0.0 <= kaggle_proportion <= 1.0:
+        raise ValueError("kaggle_proportion must be in [0, 1]")
+    if not 0.0 <= kaggle_reverse_pair_prob <= 1.0:
+        raise ValueError("kaggle_reverse_pair_prob must be in [0, 1]")
+    if include_kaggle and kaggle_path is None:
+        raise ValueError("include_kaggle=True requires kaggle_path")
     root = Path(root_dir).expanduser().resolve()
     manifest, scan_audit = build_image_manifest(
         root,
@@ -78,13 +92,24 @@ def build_face_aging_dataloaders(
         split_path=split_path,
         use_cached_splits=use_cached_splits,
     )
-    datasets: dict[str, FaceAgingDataset] = {}
+    datasets: dict[str, FaceAgingDataset | CombinedFaceAgingDataset] = {}
     loaders: dict[str, DataLoader] = {}
+    kaggle_metadata = {
+        "enabled": bool(include_kaggle),
+        "root_dir": None,
+        "images": 0,
+        "identities": 0,
+        "available_pairs": 0,
+        "selected_pairs": 0,
+        "selected_identities": 0,
+        "kaggle_proportion": float(kaggle_proportion),
+        "selection_mode": "all" if kaggle_proportion == 1.0 else "scarcity_aware_budget",
+    }
     for split_index, split in enumerate(("train", "val", "test")):
         split_manifest: list[ImageRecord] = records_for_split(manifest, assignments, split)
         strategy = train_pair_strategy if split == "train" else eval_pair_strategy
         flip_prob = horizontal_flip_prob if split == "train" else 0.0
-        dataset = FaceAgingDataset(
+        dataset: FaceAgingDataset | CombinedFaceAgingDataset = FaceAgingDataset(
             root,
             split_manifest,
             image_size=image_size,
@@ -102,6 +127,63 @@ def build_face_aging_dataloaders(
             reverse_pair_prob=reverse_pair_prob,
             seed=seed + split_index,
         )
+        if split == "train" and include_kaggle:
+            fgnet_root, fgnet_manifest, fgnet_audit = build_fgnet_manifest(
+                kaggle_path, min_age=min_age, max_age=max_age
+            )
+            fgnet_all_pairs = FaceAgingDataset(
+                fgnet_root,
+                fgnet_manifest,
+                pair_strategy="all",
+                min_age_gap=min_age_gap,
+                max_age_gap=max_age_gap,
+                seed=seed + 10_000,
+            ).all_pairs
+            selected_count = (
+                len(fgnet_all_pairs)
+                if kaggle_proportion == 1.0
+                else min(
+                    len(fgnet_all_pairs),
+                    max(0, round(len(dataset) * kaggle_proportion)),
+                )
+            )
+            selected_pairs, selection_audit = select_complementary_fgnet_pairs(
+                dataset.all_pairs,
+                fgnet_all_pairs,
+                count=selected_count,
+                seed=seed,
+            )
+            complementary = FaceAgingDataset(
+                fgnet_root,
+                fgnet_manifest,
+                image_size=image_size,
+                pair_strategy="all",
+                min_age_gap=min_age_gap,
+                max_age_gap=max_age_gap,
+                prompt_style=prompt_style,
+                dynamic_person_word=dynamic_person_word,
+                horizontal_flip_prob=horizontal_flip_prob,
+                include_zero_delta_pairs=False,
+                zero_delta_pair_prob=0.0,
+                include_bidirectional_pairs=include_bidirectional_pairs,
+                reverse_pair_prob=kaggle_reverse_pair_prob,
+                pair_records=selected_pairs,
+                seed=seed + 10_000,
+            )
+            combined = CombinedFaceAgingDataset(dataset, complementary)
+            combined.include_kaggle = True
+            combined.kaggle_proportion = float(kaggle_proportion)
+            combined.kaggle_available_pairs = len(fgnet_all_pairs)
+            combined.kaggle_selected_pairs = len(selected_pairs)
+            dataset = combined
+            kaggle_metadata.update({
+                **fgnet_audit,
+                **selection_audit,
+                "enabled": True,
+                "reverse_pair_prob": (
+                    float(kaggle_reverse_pair_prob) if include_bidirectional_pairs else 0.0
+                ),
+            })
         datasets[split] = dataset
         generator = torch.Generator().manual_seed(seed + split_index)
         kwargs = dict(
@@ -127,6 +209,7 @@ def build_face_aging_dataloaders(
         "split_assignments": assignments,
         "datasets": datasets,
         "scan_audit": scan_audit,
+        "kaggle": kaggle_metadata,
         "config": {
             "image_size": image_size,
             "batch_size": batch_size,
@@ -142,6 +225,21 @@ def build_face_aging_dataloaders(
             "zero_delta_pair_prob": float(zero_delta_pair_prob),
             "include_bidirectional_pairs": bool(include_bidirectional_pairs),
             "reverse_pair_prob": float(reverse_pair_prob),
+            "include_kaggle": bool(include_kaggle),
+            "kaggle_path": str(Path(kaggle_path).expanduser().resolve()) if kaggle_path else None,
+            "kaggle_proportion": float(kaggle_proportion),
+            "kaggle_reverse_pair_prob": float(kaggle_reverse_pair_prob),
         },
     })
+    train_dataset = datasets["train"]
+    primary_observations = int(getattr(train_dataset, "primary_observations", len(train_dataset)))
+    complementary_observations = int(getattr(train_dataset, "complementary_observations", 0))
+    primary_canonical_pairs = len(getattr(train_dataset, "all_pairs", ()))
+    print(
+        " Pair sources | "
+        f"Colombian canonical={primary_canonical_pairs:,}, epoch_observations={primary_observations:,} | "
+        f"FG-NET available={kaggle_metadata['available_pairs']:,}, selected={complementary_observations:,}, "
+        f"reverse_prob={kaggle_metadata.get('reverse_pair_prob', 0.0):.2f} | "
+        f"combined_epoch_observations={len(train_dataset):,}"
+    )
     return loaders, metadata
