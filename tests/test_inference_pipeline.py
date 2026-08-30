@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 from PIL import Image
 
@@ -11,6 +12,7 @@ from src.inference import (
     infer_face_aging_direct,
     infer_face_aging_inverse,
     prepare_inference_image,
+    resolve_inference_strength,
 )
 from training_fakes import make_training_bundle
 
@@ -78,6 +80,48 @@ def test_direct_initialization_is_source_plus_noise_and_strength_distance_increa
         distances.append(float((initial - source_latent.cpu()).norm()))
         assert not torch.equal(initial, torch.zeros_like(initial))
     assert distances[0] < distances[1] < distances[2]
+
+
+def test_delta_dependent_strength_policy_symmetry_monotonicity_and_clipping():
+    common = dict(
+        strength=0.33,
+        use_delta_dependent_strength=True,
+        base_strength=0.18,
+        strength_per_year=0.005,
+        min_strength=0.18,
+        max_strength=0.40,
+    )
+    assert resolve_inference_strength(delta_age=0, **common) == 0.18
+    assert resolve_inference_strength(delta_age=10, **common) == pytest.approx(0.23)
+    assert resolve_inference_strength(delta_age=-10, **common) == pytest.approx(0.23)
+    assert resolve_inference_strength(delta_age=100, **common) == 0.40
+    assert resolve_inference_strength(delta_age=-100, **common) == 0.40
+    assert resolve_inference_strength(
+        strength=0.27,
+        delta_age=100,
+        use_delta_dependent_strength=False,
+        base_strength=99,
+    ) == 0.27
+
+
+def test_delta_dependent_strength_reports_effective_value_and_disabled_is_exact():
+    bundle = make_training_bundle(seed=445)
+    baseline = infer_face_aging_direct(**inference_kwargs(bundle, strength=0.35))
+    disabled = infer_face_aging_direct(
+        **inference_kwargs(bundle, strength=0.35),
+        use_delta_dependent_strength=False,
+    )
+    adaptive = infer_face_aging_direct(
+        **inference_kwargs(bundle, target_age=65, source_age=30),
+        use_delta_dependent_strength=True,
+        base_strength=0.18,
+        strength_per_year=0.005,
+        min_strength=0.18,
+        max_strength=0.40,
+    )
+    assert torch.equal(baseline["latents"], disabled["latents"])
+    assert adaptive["requested_strength"] == 0.5
+    assert adaptive["strength"] == adaptive["metadata"]["effective_strength"] == 0.355
 
 
 def test_internal_batch_size_two_alignment_and_finite_outputs():

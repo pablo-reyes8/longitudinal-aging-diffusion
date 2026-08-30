@@ -12,9 +12,14 @@ from .checkpoint_loading import (
 )
 from .checkpoint_diagnostics import (
     diagnose_checkpoint_age_sweep,
+    diagnose_checkpoint_strength_sweep,
     diagnose_checkpoints_age_sweep,
 )
-from .comparison_helpers import compare_inference_modes, generate_age_sweep
+from .comparison_helpers import (
+    compare_inference_modes,
+    generate_age_sweep,
+    generate_strength_age_sweep,
+)
 from .conditioning_isolation import (
     CONDITIONING_DIAGNOSTIC_COLUMNS,
     diagnose_checkpoint_conditioning_sources,
@@ -31,6 +36,7 @@ from .infer_face_aging import (
     infer_face_aging,
     infer_face_aging_direct,
     infer_face_aging_inverse,
+    resolve_inference_strength,
     save_inference_image,
 )
 from .inference_utils import (

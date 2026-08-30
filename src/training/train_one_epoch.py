@@ -115,6 +115,9 @@ def _update_gap_metrics(tracker: MetricsTracker, batch, loss_out: dict, loss_fn)
     if relative_per_sample is not None and relative_per_sample.numel():
         indices = loss_out["auxiliary_indices"]
         values = relative_per_sample.detach().float()
+        relative_weights = loss_out.get("relative_age_sample_weights")
+        if relative_weights is not None and relative_weights.numel():
+            values = values * relative_weights.detach().float()
         per_sample[indices] += loss_fn.relative_age_weight * values
     preservation_per_sample = loss_out.get("loss_preservation_per_sample")
     if preservation_per_sample is not None and preservation_per_sample.numel():

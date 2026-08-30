@@ -9,15 +9,24 @@ from pathlib import Path
 
 import torch
 
-from .age_calibration import compute_directional_age_metrics, fit_age_response_calibration
+from .age_calibration import (
+    compute_directional_age_metrics,
+    fit_age_response_calibration,
+    fit_directional_age_calibrations,
+    summarize_age_diagnostics,
+)
 
 
 DIAGNOSTIC_CSV_FIELDS = [
     "epoch", "source_age", "target_age", "target_delta_age", "predicted_source_age",
     "predicted_generated_age", "predicted_delta_age", "age_error", "delta_age_error",
-    "identity_cosine", "mode", "text_reference_mode", "age_guidance_scale", "seed",
+    "identity_cosine", "mode", "strength", "text_reference_mode", "age_guidance_scale", "seed",
     "age_calibration_intercept", "age_calibration_slope", "age_calibration_r2",
     "age_calibration_score",
+    "forward_calibration_intercept", "forward_calibration_slope",
+    "forward_calibration_r2", "reverse_calibration_intercept",
+    "reverse_calibration_slope", "reverse_calibration_r2",
+    "forward_mae", "forward_bias", "reverse_mae", "reverse_bias",
 ]
 
 
@@ -37,6 +46,7 @@ def _diagnostic_row(*, epoch: int, result) -> dict | None:
         "delta_age_error": diagnostics["delta_age_error"],
         "identity_cosine": diagnostics["identity_cosine_source_generated"],
         "mode": result["mode"],
+        "strength": result.get("strength"),
         "text_reference_mode": result["text_reference_mode"],
         "age_guidance_scale": result["age_guidance_scale"],
         "seed": result["seed"],
@@ -95,11 +105,20 @@ def run_face_aging_monitor(
     target_age=None, source_prompt=None, source_age=None,
     mode="direct", use_inverse_diffusion=None, num_inference_steps=30,
     strength=0.35, text_guidance_scale=7.0, image_guidance_scale=1.5,
+    strength_multi: Sequence[float] | None = (0.20, 0.27, 0.35, 0.40),
+    use_delta_dependent_strength: bool = False,
+    base_strength: float = 0.18, strength_per_year: float = 0.005,
+    min_strength: float = 0.18, max_strength: float = 0.40,
     text_reference_mode="source_age", age_guidance_scale=3.0,
     seed=2026, image_size=256, compute_diagnostics: bool = True,
 ):
     """Generate one edit or an ordered age sweep from the same fixed image."""
-    from src.inference import generate_age_sweep, infer_face_aging, save_inference_image
+    from src.inference import (
+        generate_age_sweep,
+        generate_strength_age_sweep,
+        infer_face_aging,
+        save_inference_image,
+    )
 
     ages = None
     is_sweep = False
@@ -122,6 +141,9 @@ def run_face_aging_monitor(
             source_prompt=source_prompt, source_age=source_age,
             mode=mode, use_inverse_diffusion=use_inverse_diffusion,
             num_inference_steps=num_inference_steps, strength=strength,
+            use_delta_dependent_strength=use_delta_dependent_strength,
+            base_strength=base_strength, strength_per_year=strength_per_year,
+            min_strength=min_strength, max_strength=max_strength,
             text_guidance_scale=text_guidance_scale,
             text_reference_mode=text_reference_mode,
             age_guidance_scale=age_guidance_scale,
@@ -147,15 +169,25 @@ def run_face_aging_monitor(
                 diagnostic_rows.append(row)
         calibration = fit_age_response_calibration(diagnostic_rows)
         directional = compute_directional_age_metrics(diagnostic_rows)
+        directional_calibration = fit_directional_age_calibrations(diagnostic_rows)
+        repeated_metrics = {**directional_calibration, **directional}
+        for row in diagnostic_rows:
+            row.update(repeated_metrics)
         if calibration is not None:
             for row in diagnostic_rows:
                 row.update(calibration)
             print(
                 " Age calibration | "
-                f"intercept={calibration['age_calibration_intercept']:.4f} | "
-                f"slope={calibration['age_calibration_slope']:.4f} | "
-                f"R2={calibration['age_calibration_r2']:.4f} | "
-                f"score={calibration['age_calibration_score']:.4f}"
+                f"all: a={calibration['age_calibration_intercept']:.4f} "
+                f"b={calibration['age_calibration_slope']:.4f} "
+                f"R2={calibration['age_calibration_r2']:.4f} "
+                f"score={calibration['age_calibration_score']:.4f} | "
+                f"forward: a={directional_calibration['forward_calibration_intercept']:.4f} "
+                f"b={directional_calibration['forward_calibration_slope']:.4f} "
+                f"R2={directional_calibration['forward_calibration_r2']:.4f} | "
+                f"reverse: a={directional_calibration['reverse_calibration_intercept']:.4f} "
+                f"b={directional_calibration['reverse_calibration_slope']:.4f} "
+                f"R2={directional_calibration['reverse_calibration_r2']:.4f}"
             )
         elif compute_diagnostics:
             print(" Age calibration | unavailable (need MiVOLO diagnostics at >=2 distinct ages)")
@@ -174,6 +206,58 @@ def run_face_aging_monitor(
         epoch_csv, history_csv = _write_diagnostic_csvs(
             diagnostic_rows, epoch=epoch, epoch_dir=epoch_dir, history_dir=Path(output_dir)
         )
+        strength_report = None
+        if strength_multi is not None:
+            comparison = generate_strength_age_sweep(
+                bundle=bundle,
+                image=image,
+                ages=ages,
+                strengths=strength_multi,
+                output_path=epoch_dir / "strength_age_sweeps.png",
+                annotate_diagnostics=diagnostics_enabled,
+                include_source=True,
+                precomputed_sweeps={float(strength): sweep},
+                source_prompt=source_prompt,
+                source_age=source_age,
+                mode=mode,
+                use_inverse_diffusion=use_inverse_diffusion,
+                num_inference_steps=num_inference_steps,
+                text_guidance_scale=text_guidance_scale,
+                text_reference_mode=text_reference_mode,
+                age_guidance_scale=age_guidance_scale,
+                image_guidance_scale=image_guidance_scale,
+                seed=seed,
+                image_size=image_size,
+                compute_diagnostics=diagnostics_enabled,
+                identity_encoder=identity_encoder,
+                age_estimator=age_estimator,
+            )
+            summary_rows = []
+            for strength_value, strength_sweep in zip(
+                comparison["strengths"], comparison["sweeps"]
+            ):
+                rows = [
+                    row
+                    for result in strength_sweep["results"]
+                    if (row := _diagnostic_row(epoch=epoch, result=result)) is not None
+                ]
+                summary_rows.append({
+                    "epoch": int(epoch + 1),
+                    "strength": float(strength_value),
+                    **summarize_age_diagnostics(rows),
+                })
+            summary_path = epoch_dir / f"strength_sweep_summary_epoch_{epoch + 1:03d}.csv"
+            if summary_rows:
+                with summary_path.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=list(summary_rows[0]))
+                    writer.writeheader()
+                    writer.writerows(summary_rows)
+            strength_report = {
+                "grid_path": str(comparison["output_path"]),
+                "summary_csv": str(summary_path) if summary_rows else None,
+                "strengths": comparison["strengths"],
+                "summary": summary_rows,
+            }
         return {
             "output_dir": str(epoch_dir),
             "grid_path": str(sweep["output_path"]),
@@ -185,6 +269,8 @@ def run_face_aging_monitor(
             "diagnostics_history_csv": str(history_csv) if history_csv else None,
             "age_calibration": calibration,
             "age_direction": directional,
+            "directional_calibration": directional_calibration,
+            "strength_sweep": strength_report,
         }
 
     result = infer_face_aging(
@@ -193,6 +279,9 @@ def run_face_aging_monitor(
         source_prompt=source_prompt, source_age=source_age,
         mode=mode, use_inverse_diffusion=use_inverse_diffusion,
         num_inference_steps=num_inference_steps, strength=strength,
+        use_delta_dependent_strength=use_delta_dependent_strength,
+        base_strength=base_strength, strength_per_year=strength_per_year,
+        min_strength=min_strength, max_strength=max_strength,
         text_guidance_scale=text_guidance_scale,
         text_reference_mode=text_reference_mode,
         age_guidance_scale=age_guidance_scale,

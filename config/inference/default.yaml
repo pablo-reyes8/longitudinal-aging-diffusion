@@ -2,6 +2,11 @@ mode: direct
 use_inverse_diffusion: false
 num_inference_steps: 50
 strength: 0.35
+use_delta_dependent_strength: false
+base_strength: 0.18
+strength_per_year: 0.005
+min_strength: 0.18
+max_strength: 0.40
 inversion_strength: 1.0
 text_guidance_scale: 7.0
 text_reference_mode: source_age

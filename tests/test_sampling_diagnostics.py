@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 import torch
@@ -10,6 +12,7 @@ from src.inference import (
     compute_face_aging_diagnostics,
     diagnose_conditioning_sources,
     diagnose_checkpoint_age_sweep,
+    diagnose_checkpoint_strength_sweep,
     infer_face_aging_direct,
 )
 from src.loss import AgeEstimatorAdapter, IdentityEncoderAdapter
@@ -18,6 +21,7 @@ from src.training import (
     build_inference_payload,
     compute_directional_age_metrics,
     fit_age_response_calibration,
+    fit_directional_age_calibrations,
 )
 from src.training.sampling_monitor import run_face_aging_monitor
 from src.inference.checkpoint_diagnostics import _save_annotated_grid
@@ -98,12 +102,21 @@ def test_training_sweep_writes_epoch_rows_appends_history_and_calibration(tmp_pa
         assert frame["age_calibration_score"].nunique() == 1
         assert report["age_calibration"] is not None
         assert report["age_direction"]["forward_mae"] is not None
+        assert "forward_calibration_slope" in report["directional_calibration"]
         assert report["diagnostics_csv"] == str(epoch_csv)
+        strength_report = report["strength_sweep"]
+        assert strength_report["strengths"] == [0.20, 0.27, 0.35, 0.40]
+        assert Path(strength_report["grid_path"]).name == "strength_age_sweeps.png"
+        assert Path(strength_report["grid_path"]).exists()
+        assert Path(strength_report["summary_csv"]).exists()
+        epoch_dir = tmp_path / f"epoch_{epoch + 1:03d}"
+        assert len(list(epoch_dir.glob("strength*.png"))) == 1
+        assert not [path for path in epoch_dir.iterdir() if path.is_dir()]
     history = pd.read_csv(tmp_path / "sampling_diagnostics_history.csv")
     assert len(history) == 6
     assert history.groupby("epoch").size().to_dict() == {1: 3, 2: 3}
     printed = capsys.readouterr().out
-    assert printed.count("Age calibration | intercept=") == 2
+    assert printed.count("Age calibration | all: a=") == 2
     assert printed.count("Age direction   | forward_MAE=") == 2
 
 
@@ -142,6 +155,24 @@ def test_directional_age_metrics_exact_oracle_ignores_zero_delta():
     })
 
 
+def test_directional_calibration_exact_and_insufficient_direction_is_nan():
+    rows = [
+        {"target_delta_age": delta, "predicted_delta_age": 2.0 + 0.5 * delta}
+        for delta in (-30, -10, 0, 10, 30)
+    ]
+    metrics = fit_directional_age_calibrations(rows)
+    assert metrics == pytest.approx({
+        "forward_calibration_intercept": 2.0,
+        "forward_calibration_slope": 0.5,
+        "forward_calibration_r2": 1.0,
+        "reverse_calibration_intercept": 2.0,
+        "reverse_calibration_slope": 0.5,
+        "reverse_calibration_r2": 1.0,
+    })
+    forward_only = fit_directional_age_calibrations(rows[-2:])
+    assert torch.isnan(torch.tensor(forward_only["reverse_calibration_slope"]))
+
+
 def test_monitoring_history_migrates_old_csv_schema(tmp_path):
     history_path = tmp_path / "sampling_diagnostics_history.csv"
     history_path.write_text(
@@ -162,12 +193,14 @@ def test_monitoring_history_migrates_old_csv_schema(tmp_path):
         image_size=32,
     )
     history = pd.read_csv(history_path)
-    assert list(history.columns)[-4:] == [
-        "age_calibration_intercept",
-        "age_calibration_slope",
-        "age_calibration_r2",
-        "age_calibration_score",
-    ]
+    assert set([
+        "age_calibration_intercept", "age_calibration_slope",
+        "age_calibration_r2", "age_calibration_score",
+        "forward_calibration_intercept", "forward_calibration_slope",
+        "forward_calibration_r2", "reverse_calibration_intercept",
+        "reverse_calibration_slope", "reverse_calibration_r2",
+        "forward_mae", "forward_bias", "reverse_mae", "reverse_bias",
+    ]).issubset(history.columns)
     assert len(history) == 4
     assert report["age_calibration"] is not None
 
@@ -214,6 +247,33 @@ def test_checkpoint_diagnostic_age_error_and_generation_match_normal_inference(t
         assert list(saved.getdata()) == list(normal["image"].getdata())
     assert (output_dir / "age_sweep.png").exists()
     assert (output_dir / "sampling_diagnostics.csv").exists()
+
+
+def test_checkpoint_strength_sweep_saves_only_combined_grid_and_summary(tmp_path):
+    original = make_training_bundle(seed=883)
+    checkpoint = atomic_torch_save(
+        build_inference_payload(original, {"image_size": 32}),
+        tmp_path / "epoch_004" / "adapter_inference.pt",
+    )
+    rebuilt = attach_diagnostics(make_training_bundle(seed=883))
+    output_dir = tmp_path / "strength_diagnostic"
+    frame = diagnose_checkpoint_strength_sweep(
+        checkpoint_path=checkpoint,
+        bundle=rebuilt,
+        source_image=Image.new("RGB", (38, 32), (110, 75, 55)),
+        source_age=26,
+        target_ages=[16, 18, 35, 65],
+        strengths=[0.20, 0.40],
+        output_dir=output_dir,
+        num_inference_steps=2,
+        image_size=32,
+    )
+    assert frame["strength"].tolist() == [0.20, 0.40]
+    assert frame["forward_calibration_slope"].notna().all()
+    assert frame["reverse_calibration_slope"].notna().all()
+    assert (output_dir / "strength_age_sweeps.png").exists()
+    assert (output_dir / "strength_sweep_summary.csv").exists()
+    assert not list(output_dir.glob("age_*.png"))
 
 
 def test_checkpoint_grid_places_rejuvenation_before_source_and_aging_after(tmp_path):

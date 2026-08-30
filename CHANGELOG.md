@@ -40,3 +40,6 @@ to use semantic versioning after its first stable release.
   contract, preventing notebook module reloads from being mistaken for V1.
 - Parallel calibration-aware checkpoint selection plus forward/reverse age-error
   diagnostics, reusing the existing monitoring sweep without extra inference.
+- Separate forward/reverse calibration fits, optional reverse-relative loss
+  weighting, optional delta-dependent inference strength, and one-grid
+  multi-strength epoch diagnostics.

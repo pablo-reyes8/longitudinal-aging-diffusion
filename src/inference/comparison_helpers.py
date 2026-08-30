@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from PIL import Image, ImageDraw
 
@@ -34,10 +34,15 @@ def _age_diagnostic_label(result) -> str:
         f"Delta: {diagnostics['predicted_delta_age']:.1f}\n"
         if diagnostics.get("predicted_delta_age") is not None else ""
     )
+    strength_label = (
+        f"Strength: {result['strength']:.3f}\n"
+        if result.get("strength") is not None else ""
+    )
     return (
         f"Target: {diagnostics['target_age']:.0f}\n"
         f"Pred: {diagnostics['predicted_generated_age']:.1f}\n"
         f"{delta_label}"
+        f"{strength_label}"
         f"ID: {diagnostics['identity_cosine_source_generated']:.2f}"
     )
 
@@ -104,3 +109,68 @@ def generate_age_sweep(
         saved.parent.mkdir(parents=True, exist_ok=True)
         grid.save(saved)
     return {"ages": ordered_ages, "results": results, "grid": grid, "output_path": saved}
+
+
+def generate_strength_age_sweep(
+    *,
+    bundle,
+    image,
+    ages: Iterable[int],
+    strengths: Sequence[float],
+    output_path: str | Path | None = None,
+    annotate_diagnostics: bool = True,
+    include_source: bool = True,
+    precomputed_sweeps: dict[float, dict] | None = None,
+    **kwargs,
+):
+    """Render several fixed-strength age sweeps into one lossless comparison grid."""
+    values = [float(value) for value in strengths]
+    ordered_ages = [int(age) for age in ages]
+    if not ordered_ages:
+        raise ValueError("ages must not be empty")
+    if not values or any(not 0 < value <= 1 for value in values):
+        raise ValueError("strengths must be a non-empty sequence with values in (0, 1]")
+    if len(set(values)) != len(values):
+        raise ValueError("strengths must be unique")
+    kwargs.pop("strength", None)
+    kwargs["use_delta_dependent_strength"] = False
+    cached = precomputed_sweeps or {}
+    sweeps = []
+    for value in values:
+        sweep = cached.get(value)
+        if sweep is None:
+            sweep = generate_age_sweep(
+                bundle=bundle,
+                image=image,
+                ages=ordered_ages,
+                output_path=None,
+                annotate_diagnostics=annotate_diagnostics,
+                include_source=include_source,
+                strength=value,
+                **kwargs,
+            )
+        sweeps.append(sweep)
+    label_width = 128
+    row_gap = 8
+    width = label_width + max(sweep["grid"].width for sweep in sweeps)
+    height = sum(sweep["grid"].height for sweep in sweeps) + row_gap * (len(sweeps) - 1)
+    combined = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(combined)
+    y = 0
+    for value, sweep in zip(values, sweeps):
+        grid = sweep["grid"]
+        draw.text((8, y + 12), f"Strength\n{value:.3f}", fill="black", spacing=4)
+        combined.paste(grid, (label_width, y))
+        y += grid.height + row_gap
+    saved = None
+    if output_path is not None:
+        saved = Path(output_path)
+        saved.parent.mkdir(parents=True, exist_ok=True)
+        # PNG preserves native 256px cells for detailed notebook zooming.
+        combined.save(saved, format="PNG", optimize=False)
+    return {
+        "strengths": values,
+        "sweeps": sweeps,
+        "grid": combined,
+        "output_path": saved,
+    }

@@ -131,6 +131,8 @@ def train_model(
     use_relative_age_loss: bool | None = None,
     relative_age_weight: float | None = None,
     relative_age_loss_type: str | None = None,
+    use_directional_relative_weighting: bool | None = None,
+    reverse_relative_weight: float | None = None,
     use_preservation_loss: bool | None = None,
     preservation_weight: float | None = None,
     preservation_loss_type: str | None = None,
@@ -189,6 +191,12 @@ def train_model(
     monitoring_use_inverse_diffusion: bool | None = None,
     monitoring_num_inference_steps: int = 30,
     monitoring_strength: float = 0.35,
+    monitoring_strength_multi: Sequence[float] | None = (0.20, 0.27, 0.35, 0.40),
+    monitoring_use_delta_dependent_strength: bool = False,
+    monitoring_base_strength: float = 0.18,
+    monitoring_strength_per_year: float = 0.005,
+    monitoring_min_strength: float = 0.18,
+    monitoring_max_strength: float = 0.40,
     monitoring_text_guidance_scale: float = 7.0,
     monitoring_text_reference_mode: str = "source_age",
     monitoring_age_guidance_scale: float = 3.0,
@@ -249,6 +257,28 @@ def train_model(
         monitoring_ages, monitoring_is_sweep = normalize_monitoring_ages(monitoring_target_age)
         if monitoring_is_sweep and monitoring_target_prompt is not None:
             raise ValueError("monitoring_target_prompt cannot be combined with multiple target ages")
+    resolved_monitoring_strengths = None
+    if monitoring_strength_multi is not None:
+        resolved_monitoring_strengths = tuple(
+            float(value) for value in monitoring_strength_multi
+        )
+        if (
+            not resolved_monitoring_strengths
+            or any(not 0 < value <= 1 for value in resolved_monitoring_strengths)
+            or len(set(resolved_monitoring_strengths)) != len(resolved_monitoring_strengths)
+        ):
+            raise ValueError(
+                "monitoring_strength_multi must contain unique values in (0, 1]"
+            )
+    if monitoring_use_delta_dependent_strength and (
+        not all(math.isfinite(value) for value in (
+            monitoring_base_strength, monitoring_strength_per_year,
+            monitoring_min_strength, monitoring_max_strength,
+        ))
+        or monitoring_strength_per_year < 0
+        or not 0 < monitoring_min_strength <= monitoring_max_strength <= 1
+    ):
+        raise ValueError("invalid delta-dependent monitoring strength policy")
     resolved_monitoring_mode = (
         ("inverse" if monitoring_use_inverse_diffusion else "direct")
         if monitoring_use_inverse_diffusion is not None else monitoring_mode
@@ -290,6 +320,14 @@ def train_model(
         if relative_age_loss_type not in {"l1", "mse"}:
             raise ValueError("relative_age_loss_type must be 'l1' or 'mse'")
         loss_fn.relative_age_loss_type = relative_age_loss_type
+    if use_directional_relative_weighting is not None:
+        loss_fn.use_directional_relative_weighting = bool(
+            use_directional_relative_weighting
+        )
+    if reverse_relative_weight is not None:
+        if reverse_relative_weight <= 0:
+            raise ValueError("reverse_relative_weight must be positive")
+        loss_fn.reverse_relative_weight = float(reverse_relative_weight)
     if loss_fn.use_relative_age_loss and loss_fn.relative_age_weight > 0 and loss_fn.age_estimator is None:
         raise ValueError("Enabled relative age loss requires an age estimator")
     if use_preservation_loss is not None:
@@ -372,6 +410,8 @@ def train_model(
         "use_relative_age_loss": loss_fn.use_relative_age_loss,
         "relative_age_weight": loss_fn.relative_age_weight,
         "relative_age_loss_type": loss_fn.relative_age_loss_type,
+        "use_directional_relative_weighting": loss_fn.use_directional_relative_weighting,
+        "reverse_relative_weight": loss_fn.reverse_relative_weight,
         "use_preservation_loss": loss_fn.use_preservation_loss,
         "preservation_weight": loss_fn.preservation_weight,
         "preservation_loss_type": loss_fn.preservation_loss_type,
@@ -411,6 +451,17 @@ def train_model(
         "monitoring_mode": resolved_monitoring_mode,
         "monitoring_num_inference_steps": monitoring_num_inference_steps,
         "monitoring_strength": monitoring_strength,
+        "monitoring_strength_multi": (
+            list(resolved_monitoring_strengths)
+            if resolved_monitoring_strengths is not None else None
+        ),
+        "monitoring_use_delta_dependent_strength": bool(
+            monitoring_use_delta_dependent_strength
+        ),
+        "monitoring_base_strength": float(monitoring_base_strength),
+        "monitoring_strength_per_year": float(monitoring_strength_per_year),
+        "monitoring_min_strength": float(monitoring_min_strength),
+        "monitoring_max_strength": float(monitoring_max_strength),
         "monitoring_text_reference_mode": monitoring_text_reference_mode,
         "monitoring_age_guidance_scale": monitoring_age_guidance_scale,
         "monitoring_seed": monitoring_seed,
@@ -435,7 +486,9 @@ def train_model(
     monitoring_text = (
         f"every {sample_every_epochs} epoch(s), mode={resolved_monitoring_mode}, "
         f"strength={monitoring_strength}, ages={monitoring_ages}, seed={monitoring_seed}, "
-        f"text_ref={monitoring_text_reference_mode}, age_cfg={monitoring_age_guidance_scale}"
+        f"text_ref={monitoring_text_reference_mode}, age_cfg={monitoring_age_guidance_scale}, "
+        f"strength_sweep={list(resolved_monitoring_strengths) if resolved_monitoring_strengths is not None else 'off'}, "
+        f"delta_strength={monitoring_use_delta_dependent_strength}"
         if monitoring_image is not None else "disabled"
     )
     print("\n" + "=" * 104)
@@ -472,6 +525,10 @@ def train_model(
         f" Objective     diffusion={loss_fn.diffusion_weight:g} | identity={loss_fn.identity_weight:g} | "
         f"age_abs={loss_fn.age_weight:g} | age_relative={loss_fn.relative_age_weight:g} "
         f"({'on' if loss_fn.use_relative_age_loss else 'off'}) | Min-SNR={min_snr_gamma}"
+    )
+    print(
+        f" Relative dir  enabled={loss_fn.use_directional_relative_weighting} | "
+        f"reverse_multiplier={loss_fn.reverse_relative_weight:g}"
     )
     print(
         f" Preservation enabled={loss_fn.use_preservation_loss} | weight={loss_fn.preservation_weight:g} | "
@@ -655,6 +712,12 @@ def train_model(
                     use_inverse_diffusion=monitoring_use_inverse_diffusion,
                     num_inference_steps=monitoring_num_inference_steps,
                     strength=monitoring_strength,
+                    strength_multi=resolved_monitoring_strengths,
+                    use_delta_dependent_strength=monitoring_use_delta_dependent_strength,
+                    base_strength=monitoring_base_strength,
+                    strength_per_year=monitoring_strength_per_year,
+                    min_strength=monitoring_min_strength,
+                    max_strength=monitoring_max_strength,
                     text_guidance_scale=monitoring_text_guidance_scale,
                     text_reference_mode=monitoring_text_reference_mode,
                     age_guidance_scale=monitoring_age_guidance_scale,

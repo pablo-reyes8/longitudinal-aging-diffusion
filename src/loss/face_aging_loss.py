@@ -60,6 +60,8 @@ class FaceAgingDiffusionLoss(nn.Module):
         use_relative_age_loss: bool = False,
         relative_age_weight: float = 0.0,
         relative_age_loss_type: str = "l1",
+        use_directional_relative_weighting: bool = False,
+        reverse_relative_weight: float = 1.25,
         use_preservation_loss: bool = False,
         preservation_weight: float = 0.10,
         preservation_loss_type: str = "l1",
@@ -94,6 +96,8 @@ class FaceAgingDiffusionLoss(nn.Module):
             raise ValueError("age_loss_type must be 'l1' or 'mse'")
         if relative_age_loss_type not in {"l1", "mse"}:
             raise ValueError("relative_age_loss_type must be 'l1' or 'mse'")
+        if reverse_relative_weight <= 0:
+            raise ValueError("reverse_relative_weight must be positive")
         if preservation_loss_type not in {"l1", "mse"}:
             raise ValueError("preservation_loss_type must be 'l1' or 'mse'")
         if preservation_max_delta < 0:
@@ -129,6 +133,10 @@ class FaceAgingDiffusionLoss(nn.Module):
         self.use_relative_age_loss = bool(use_relative_age_loss)
         self.relative_age_weight = float(relative_age_weight)
         self.relative_age_loss_type = relative_age_loss_type
+        self.use_directional_relative_weighting = bool(
+            use_directional_relative_weighting
+        )
+        self.reverse_relative_weight = float(reverse_relative_weight)
         self.use_preservation_loss = bool(use_preservation_loss)
         self.preservation_weight = float(preservation_weight)
         self.preservation_loss_type = preservation_loss_type
@@ -173,6 +181,8 @@ class FaceAgingDiffusionLoss(nn.Module):
             "use_relative_age_loss": self.use_relative_age_loss,
             "relative_age_weight": self.relative_age_weight,
             "relative_age_loss_type": self.relative_age_loss_type,
+            "use_directional_relative_weighting": self.use_directional_relative_weighting,
+            "reverse_relative_weight": self.reverse_relative_weight,
             "use_preservation_loss": self.use_preservation_loss,
             "preservation_weight": self.preservation_weight,
             "preservation_loss_type": self.preservation_loss_type,
@@ -369,6 +379,7 @@ class FaceAgingDiffusionLoss(nn.Module):
         id_per_sample = loss_diff.new_empty(0)
         age_per_sample = loss_diff.new_empty(0)
         relative_age_per_sample = loss_diff.new_empty(0)
+        relative_age_sample_weights = loss_diff.new_empty(0)
         preservation_per_sample = loss_diff.new_empty(0)
         identity_cosine_mean = None
         predicted_age_mean = None
@@ -495,7 +506,20 @@ class FaceAgingDiffusionLoss(nn.Module):
                         if self.relative_age_loss_type == "l1"
                         else relative_errors.square()
                     )
-                    loss_relative_age = relative_age_per_sample.mean()
+                    relative_age_sample_weights = torch.ones_like(
+                        relative_age_per_sample
+                    )
+                    if self.use_directional_relative_weighting:
+                        relative_age_sample_weights = torch.where(
+                            target_deltas < 0,
+                            relative_age_sample_weights.new_full(
+                                (), self.reverse_relative_weight
+                            ),
+                            relative_age_sample_weights,
+                        )
+                    loss_relative_age = (
+                        relative_age_per_sample * relative_age_sample_weights
+                    ).mean()
                     predicted_source_age_mean = float(predicted_source_ages.mean())
                     predicted_delta_age_mean = float(predicted_deltas.detach().mean())
                     target_delta_age_mean = float(target_deltas.detach().mean())
@@ -558,6 +582,12 @@ class FaceAgingDiffusionLoss(nn.Module):
             "small_delta_count": int(small_delta_mask.sum()),
             "small_delta_fraction": float(small_delta_mask.float().mean()),
             "small_delta_mean_weight": float(sample_weights.detach().mean()),
+            "relative_reverse_weight": self.reverse_relative_weight,
+            "directional_relative_weighting": self.use_directional_relative_weighting,
+            "relative_sample_mean_weight": (
+                float(relative_age_sample_weights.detach().mean())
+                if relative_age_sample_weights.numel() else 0.0
+            ),
         }
         output: dict[str, Any] = {
             "loss": total_loss,
@@ -588,6 +618,7 @@ class FaceAgingDiffusionLoss(nn.Module):
                 "loss_id_per_sample": id_per_sample,
                 "loss_age_per_sample": age_per_sample,
                 "loss_relative_age_per_sample": relative_age_per_sample,
+                "relative_age_sample_weights": relative_age_sample_weights.detach(),
                 "loss_preservation_per_sample": preservation_per_sample,
             })
         if return_reconstructions and decode_applied:

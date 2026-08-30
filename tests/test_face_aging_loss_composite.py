@@ -251,6 +251,45 @@ def test_relative_age_loss_preserves_negative_rejuvenation_target():
     assert torch.isfinite(output["loss_relative_age"])
 
 
+def test_directional_relative_weighting_is_exact_optional_and_finite():
+    loss_fn = make_loss(
+        identity_weight=0,
+        age_weight=0,
+        use_relative_age_loss=True,
+        relative_age_weight=0.05,
+        use_directional_relative_weighting=False,
+        reverse_relative_weight=1.75,
+    )
+    inputs = make_inputs(loss_fn, batch=3)
+    inputs["source_ages"] = torch.tensor([40.0, 30.0, 20.0])
+    inputs["target_ages"] = torch.tensor([30.0, 30.0, 30.0])
+    inputs["delta_ages"] = torch.tensor([-10.0, 0.0, 10.0])
+    disabled = loss_fn(**inputs, return_per_sample=True)
+    assert torch.equal(disabled["relative_age_sample_weights"], torch.ones(3, dtype=torch.float64))
+    assert torch.equal(
+        disabled["loss_relative_age"],
+        disabled["loss_relative_age_per_sample"].mean(),
+    )
+
+    loss_fn.use_directional_relative_weighting = True
+    enabled_inputs = make_inputs(loss_fn, batch=3)
+    enabled_inputs.update({
+        "source_ages": inputs["source_ages"],
+        "target_ages": inputs["target_ages"],
+        "delta_ages": inputs["delta_ages"],
+    })
+    enabled = loss_fn(**enabled_inputs, return_per_sample=True)
+    expected_weights = torch.tensor([1.75, 1.0, 1.0], dtype=torch.float64)
+    assert torch.equal(enabled["relative_age_sample_weights"], expected_weights)
+    assert torch.equal(
+        enabled["loss_relative_age"],
+        (enabled["loss_relative_age_per_sample"] * expected_weights).mean(),
+    )
+    enabled["weighted_relative_age"].backward()
+    assert enabled_inputs["model_pred"].grad is not None
+    assert torch.isfinite(enabled_inputs["model_pred"].grad).all()
+
+
 def test_per_sample_reduction_duplicate_and_batch_size_invariance():
     loss_fn = make_loss(identity_weight=0, age_weight=0)
     single = make_inputs(loss_fn, batch=1)

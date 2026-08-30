@@ -115,6 +115,11 @@ def validate_checkpoint_compatibility(
     }
     saved_loss = payload.get("loss_config")
     current_loss = loss_fn.get_config() if hasattr(loss_fn, "get_config") else None
+    if saved_loss is not None:
+        saved_loss = dict(saved_loss)
+        # Defaults added after early checkpoints; absence means legacy baseline.
+        saved_loss.setdefault("use_directional_relative_weighting", False)
+        saved_loss.setdefault("reverse_relative_weight", 1.25)
     if saved_loss is not None and current_loss is not None and saved_loss != current_loss:
         mismatches["loss_config"] = {"checkpoint": saved_loss, "current": current_loss}
     saved_training = payload.get("training_config", {})

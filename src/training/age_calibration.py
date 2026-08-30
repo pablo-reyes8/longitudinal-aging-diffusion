@@ -66,3 +66,63 @@ def compute_directional_age_metrics(rows: Iterable[Mapping]) -> dict[str, float 
         )
         result[f"{direction}_bias"] = sum(values) / len(values) if values else None
     return result
+
+
+def fit_directional_age_calibrations(rows: Iterable[Mapping]) -> dict[str, float]:
+    """Fit independent regressions for positive and negative requested deltas."""
+    materialized = list(rows)
+    output: dict[str, float] = {}
+    for direction, predicate in (
+        ("forward", lambda value: value > 0),
+        ("reverse", lambda value: value < 0),
+    ):
+        selected = []
+        for row in materialized:
+            requested = row.get("target_delta_age")
+            if requested is None:
+                continue
+            requested = float(requested)
+            if math.isfinite(requested) and predicate(requested):
+                selected.append(row)
+        fit = fit_age_response_calibration(selected)
+        output[f"{direction}_calibration_intercept"] = (
+            fit["age_calibration_intercept"] if fit is not None else math.nan
+        )
+        output[f"{direction}_calibration_slope"] = (
+            fit["age_calibration_slope"] if fit is not None else math.nan
+        )
+        output[f"{direction}_calibration_r2"] = (
+            fit["age_calibration_r2"] if fit is not None else math.nan
+        )
+    return output
+
+
+def summarize_age_diagnostics(rows: Iterable[Mapping]) -> dict[str, float]:
+    """Return calibration, direction-error, and identity summaries for one sweep."""
+    materialized = list(rows)
+    calibration = fit_age_response_calibration(materialized)
+    if calibration is None:
+        calibration = {
+            "age_calibration_intercept": math.nan,
+            "age_calibration_slope": math.nan,
+            "age_calibration_r2": math.nan,
+            "age_calibration_score": math.nan,
+        }
+    direction = compute_directional_age_metrics(materialized)
+    direction_finite = {
+        key: math.nan if value is None else float(value)
+        for key, value in direction.items()
+    }
+    identities = []
+    for row in materialized:
+        value = row.get("identity_cosine")
+        if value is not None and math.isfinite(float(value)):
+            identities.append(float(value))
+    return {
+        **calibration,
+        **fit_directional_age_calibrations(materialized),
+        **direction_finite,
+        "mean_identity_cosine": (
+            sum(identities) / len(identities) if identities else math.nan
+        ),
+    }

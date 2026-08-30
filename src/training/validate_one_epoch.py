@@ -35,6 +35,9 @@ def _stratified_metrics(tracker: MetricsTracker, batch, output: dict, loss_fn) -
     if output["loss_relative_age_per_sample"].numel():
         indices = output["auxiliary_indices"]
         values = output["loss_relative_age_per_sample"].detach().float()
+        relative_weights = output.get("relative_age_sample_weights")
+        if relative_weights is not None and relative_weights.numel():
+            values = values * relative_weights.detach().float()
         total[indices] += loss_fn.relative_age_weight * values
     if output["loss_preservation_per_sample"].numel():
         indices = output["preservation_indices"]

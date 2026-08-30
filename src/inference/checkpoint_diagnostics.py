@@ -10,6 +10,7 @@ import pandas as pd
 from PIL import Image, ImageDraw
 
 from .checkpoint_loading import load_face_aging_adapter_for_inference
+from .comparison_helpers import generate_strength_age_sweep
 from .infer_face_aging import infer_face_aging, save_inference_image
 from .inference_utils import prepare_inference_image, tensor_to_pil
 
@@ -20,6 +21,16 @@ DIAGNOSTIC_COLUMNS = [
     "age_error", "delta_age_error", "identity_cosine", "mode", "strength",
     "num_inference_steps", "text_guidance_scale", "text_reference_mode",
     "age_guidance_scale", "image_guidance_scale", "seed",
+]
+
+STRENGTH_SUMMARY_COLUMNS = [
+    "checkpoint", "strength", "age_calibration_intercept",
+    "age_calibration_slope", "age_calibration_r2", "age_calibration_score",
+    "forward_calibration_intercept", "forward_calibration_slope",
+    "forward_calibration_r2", "reverse_calibration_intercept",
+    "reverse_calibration_slope", "reverse_calibration_r2",
+    "forward_mae", "forward_bias", "reverse_mae", "reverse_bias",
+    "mean_identity_cosine",
 ]
 
 
@@ -97,6 +108,11 @@ def diagnose_checkpoint_age_sweep(
     use_inverse_diffusion: bool | None = None,
     num_inference_steps: int = 50,
     strength: float = 0.35,
+    use_delta_dependent_strength: bool = False,
+    base_strength: float = 0.18,
+    strength_per_year: float = 0.005,
+    min_strength: float = 0.18,
+    max_strength: float = 0.40,
     inversion_strength: float = 1.0,
     text_guidance_scale: float = 7.0,
     text_reference_mode: str = "source_age",
@@ -130,6 +146,11 @@ def diagnose_checkpoint_age_sweep(
             use_inverse_diffusion=use_inverse_diffusion,
             num_inference_steps=num_inference_steps,
             strength=strength,
+            use_delta_dependent_strength=use_delta_dependent_strength,
+            base_strength=base_strength,
+            strength_per_year=strength_per_year,
+            min_strength=min_strength,
+            max_strength=max_strength,
             inversion_strength=inversion_strength,
             text_guidance_scale=text_guidance_scale,
             text_reference_mode=text_reference_mode,
@@ -173,7 +194,10 @@ def diagnose_checkpoint_age_sweep(
             "delta_age_error": diagnostics["delta_age_error"],
             "identity_cosine": diagnostics["identity_cosine_source_generated"],
             "mode": result["mode"],
-            "strength": float(strength),
+            "strength": (
+                float(result["strength"])
+                if result.get("strength") is not None else float(strength)
+            ),
             "num_inference_steps": int(num_inference_steps),
             "text_guidance_scale": float(text_guidance_scale),
             "text_reference_mode": result["text_reference_mode"],
@@ -188,6 +212,85 @@ def diagnose_checkpoint_age_sweep(
         frame.attrs.update({
             "output_dir": str(destination),
             "grid_path": str(destination / "age_sweep.png"),
+            "csv_path": str(csv_path),
+        })
+    return frame
+
+
+def diagnose_checkpoint_strength_sweep(
+    checkpoint_path: str | Path,
+    bundle,
+    source_image,
+    source_age: int,
+    target_ages: Iterable[int],
+    *,
+    strengths: Sequence[float] = (0.20, 0.275, 0.35, 0.425),
+    output_dir: str | Path | None = None,
+    num_inference_steps: int = 50,
+    text_guidance_scale: float = 7.0,
+    text_reference_mode: str = "source_age",
+    age_guidance_scale: float = 3.0,
+    image_guidance_scale: float = 1.5,
+    negative_prompt: str = "",
+    prompt_style: str = "selfage",
+    use_cfg: bool = True,
+    seed: int = 2026,
+    image_size: int = 256,
+    strict_config: bool = True,
+) -> pd.DataFrame:
+    """Compare fixed img2img strengths in one grid without individual images."""
+    from src.training.age_calibration import summarize_age_diagnostics
+
+    _require_auxiliaries(bundle)
+    checkpoint = Path(checkpoint_path).expanduser()
+    load_face_aging_adapter_for_inference(bundle, checkpoint, strict_config=strict_config)
+    destination = Path(output_dir).expanduser() if output_dir is not None else None
+    comparison = generate_strength_age_sweep(
+        bundle=bundle,
+        image=source_image,
+        ages=target_ages,
+        strengths=strengths,
+        output_path=(destination / "strength_age_sweeps.png") if destination else None,
+        annotate_diagnostics=True,
+        include_source=True,
+        source_age=source_age,
+        mode="direct",
+        num_inference_steps=num_inference_steps,
+        text_guidance_scale=text_guidance_scale,
+        text_reference_mode=text_reference_mode,
+        age_guidance_scale=age_guidance_scale,
+        image_guidance_scale=image_guidance_scale,
+        negative_prompt=negative_prompt,
+        prompt_style=prompt_style,
+        use_cfg=use_cfg,
+        seed=seed,
+        image_size=image_size,
+        compute_diagnostics=True,
+    )
+    summary_rows = []
+    for strength_value, sweep in zip(comparison["strengths"], comparison["sweeps"]):
+        rows = []
+        for result in sweep["results"]:
+            diagnostics = result.get("diagnostics")
+            if diagnostics is None:
+                raise RuntimeError("Auxiliary diagnostics unexpectedly returned None")
+            rows.append({
+                "target_delta_age": diagnostics["target_delta_age"],
+                "predicted_delta_age": diagnostics["predicted_delta_age"],
+                "identity_cosine": diagnostics["identity_cosine_source_generated"],
+            })
+        summary_rows.append({
+            "checkpoint": _checkpoint_label(checkpoint),
+            "strength": float(strength_value),
+            **summarize_age_diagnostics(rows),
+        })
+    frame = pd.DataFrame(summary_rows, columns=STRENGTH_SUMMARY_COLUMNS)
+    if destination is not None:
+        destination.mkdir(parents=True, exist_ok=True)
+        csv_path = destination / "strength_sweep_summary.csv"
+        frame.to_csv(csv_path, index=False)
+        frame.attrs.update({
+            "grid_path": str(destination / "strength_age_sweeps.png"),
             "csv_path": str(csv_path),
         })
     return frame

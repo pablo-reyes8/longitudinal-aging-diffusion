@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-EE4C2C?logo=pytorch&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Tests](https://img.shields.io/badge/tests-262%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-267%20passed-brightgreen)
 
 Supervised photo aging from real longitudinal observations. The project adapts
 Stable Diffusion 1.5 with source-image conditioning, explicit absolute/relative
@@ -149,6 +149,8 @@ monitoring_target_age = [16, 18, 24, 30, 35, 40, 50, 65]
 ```
 
 Each monitored epoch saves individual generations, an age_sweep.png, and sampling diagnostics containing target age, predicted age, identity cosine similarity, and age-calibration statistics (intercept, slope, R²). The grid is chronological: rejuvenation targets appear left of the original and aging targets appear right.
+
+Forward and reverse calibration fits are tracked independently. A default multi-strength diagnostic (`0.20`, `0.27`, `0.35`, `0.40`) is saved as one native-resolution PNG plus one compact summary CSV; it does not create per-strength image trees. Optional reverse-only relative-loss weighting and delta-dependent inference strength remain disabled by default.
 
 Checkpoint selection keeps two independent best models: `best/` follows validation loss, while `best_calibration_checkpoint/` minimizes `|intercept| + 10|slope - 1|` from the existing monitoring sweep.
 

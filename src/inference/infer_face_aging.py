@@ -36,6 +36,34 @@ def _scale_model_input(scheduler, latents, timestep):
     return method(latents, timestep) if method is not None else latents
 
 
+def resolve_inference_strength(
+    *,
+    strength: float,
+    delta_age: float | None,
+    use_delta_dependent_strength: bool = False,
+    base_strength: float = 0.18,
+    strength_per_year: float = 0.005,
+    min_strength: float = 0.18,
+    max_strength: float = 0.40,
+) -> float:
+    """Resolve fixed or smoothly delta-dependent direct-edit strength."""
+    if not use_delta_dependent_strength:
+        return float(strength)
+    if delta_age is None:
+        raise ValueError(
+            "source_age and target_age are required for delta-dependent strength"
+        )
+    values = (base_strength, strength_per_year, min_strength, max_strength)
+    if not all(torch.isfinite(torch.tensor(float(value))) for value in values):
+        raise ValueError("delta-dependent strength parameters must be finite")
+    if strength_per_year < 0:
+        raise ValueError("strength_per_year must be non-negative")
+    if not 0 < min_strength <= max_strength <= 1:
+        raise ValueError("strength bounds must satisfy 0 < min_strength <= max_strength <= 1")
+    resolved = float(base_strength) + float(strength_per_year) * abs(float(delta_age))
+    return min(float(max_strength), max(float(min_strength), resolved))
+
+
 @torch.no_grad()
 def _direct_latent_edit(
     *,
@@ -130,6 +158,11 @@ def infer_face_aging(
     use_inverse_diffusion: bool | None = None,
     num_inference_steps: int = 50,
     strength: float = 0.35,
+    use_delta_dependent_strength: bool = False,
+    base_strength: float = 0.18,
+    strength_per_year: float = 0.005,
+    min_strength: float = 0.18,
+    max_strength: float = 0.40,
     inversion_strength: float = 1.0,
     text_guidance_scale: float = 7.0,
     text_reference_mode: str = "source_age",
@@ -165,6 +198,23 @@ def infer_face_aging(
         target_prompt=target_prompt, target_age=target_age,
         source_prompt=source_prompt, source_age=source_age,
         prompt_style=prompt_style, negative_prompt=negative_prompt,
+    )
+    requested_delta_for_strength = (
+        float(prompt_pack["target_age"] - prompt_pack["source_age"])
+        if prompt_pack["source_age"] is not None and prompt_pack["target_age"] is not None
+        else None
+    )
+    effective_strength = (
+        resolve_inference_strength(
+            strength=strength,
+            delta_age=requested_delta_for_strength,
+            use_delta_dependent_strength=use_delta_dependent_strength,
+            base_strength=base_strength,
+            strength_per_year=strength_per_year,
+            min_strength=min_strength,
+            max_strength=max_strength,
+        )
+        if mode == "direct" else None
     )
     # Milestone 09 deliberately changes only direct editing. Inverse diffusion
     # remains on the legacy null-referenced guidance path.
@@ -260,7 +310,7 @@ def infer_face_aging(
                 reference_prompt=reference_prompt,
                 negative_prompt=negative_prompt,
                 scheduler=scheduler, num_inference_steps=num_inference_steps,
-                strength=strength,
+                strength=effective_strength,
                 text_guidance_scale=text_guidance_scale,
                 age_guidance_scale=resolved_age_guidance_scale,
                 image_guidance_scale=image_guidance_scale,
@@ -321,7 +371,8 @@ def infer_face_aging(
         "source_age": prompt_pack["source_age"],
         "target_age": prompt_pack["target_age"],
         "num_inference_steps": num_inference_steps,
-        "strength": strength if mode == "direct" else None,
+        "strength": effective_strength,
+        "requested_strength": float(strength) if mode == "direct" else None,
         "inversion_strength": inversion_strength if mode == "inverse" else None,
         "text_guidance_scale": text_guidance_scale,
         "text_reference_mode": resolved_text_reference_mode,
@@ -342,6 +393,12 @@ def infer_face_aging(
             "true_delta_age": true_delta_value,
             "effective_target_age": effective_target_age_value,
             "override_delta_age": override_delta_age,
+            "use_delta_dependent_strength": bool(use_delta_dependent_strength),
+            "base_strength": float(base_strength),
+            "strength_per_year": float(strength_per_year),
+            "min_strength": float(min_strength),
+            "max_strength": float(max_strength),
+            "effective_strength": effective_strength,
             "start_timestep": edit.get("start_timestep", inversion.get("start_timestep") if inversion else None),
         },
     }
