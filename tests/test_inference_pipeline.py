@@ -179,3 +179,34 @@ def test_comparison_grid_and_age_sweep_order(tmp_path):
     assert sweep["ages"] == [35, 45, 65]
     assert [result["target_age"] for result in sweep["results"]] == [35, 45, 65]
     assert sweep["grid"].size == (96, 60) and (tmp_path / "sweep.png").exists()
+
+
+def test_training_monitor_sweep_places_source_between_younger_and_older_targets(monkeypatch):
+    colors = {16: (0, 255, 0), 35: (0, 0, 255), 65: (255, 0, 0)}
+
+    def fake_inference(*, target_age, **kwargs):
+        return {
+            "target_age": target_age,
+            "image": Image.new("RGB", (16, 16), colors[target_age]),
+        }
+
+    monkeypatch.setattr(
+        "src.inference.comparison_helpers.infer_face_aging", fake_inference
+    )
+    sweep = generate_age_sweep(
+        bundle=None,
+        image=Image.new("RGB", (16, 16), (0, 0, 0)),
+        ages=[65, 16, 35],
+        source_age=30,
+        image_size=16,
+        include_source=True,
+    )
+    # The public result order remains the caller's order; only the grid is chronological.
+    assert sweep["ages"] == [65, 16, 35]
+    assert [result["target_age"] for result in sweep["results"]] == [65, 16, 35]
+    assert [sweep["grid"].getpixel((8 + 16 * index, 36)) for index in range(4)] == [
+        colors[16],
+        (0, 0, 0),
+        colors[35],
+        colors[65],
+    ]

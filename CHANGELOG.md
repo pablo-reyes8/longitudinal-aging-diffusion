@@ -34,5 +34,7 @@ to use semantic versioning after its first stable release.
 - Optional FG-NET complementary source with strict filename parsing, unchanged
   Colombian coverage, scarcity-aware transition selection, identity balancing,
   and stronger configurable reverse-pair exposure.
-- Chronological checkpoint-diagnostic grids that place rejuvenation targets to
-  the left of the source image and aging targets to its right.
+- Chronological checkpoint-diagnostic and training-monitor grids that place
+  rejuvenation targets left of the source image and aging targets to its right.
+- Reload-safe Age Conditioner V2 dispatch based on its serialized input
+  contract, preventing notebook module reloads from being mistaken for V1.

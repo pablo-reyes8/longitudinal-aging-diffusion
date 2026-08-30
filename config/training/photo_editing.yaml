@@ -57,7 +57,7 @@ validation_seed: 2026
 sample_every_epochs: 1
 monitoring_compute_diagnostics: true
 monitoring_image: null
-monitoring_target_age: [30, 35, 40, 50, 65]
+monitoring_target_age: [16, 18, 24, 30, 35, 40, 50, 65]
 monitoring_source_age: null  # required when monitoring_image is supplied
 monitoring_use_inverse_diffusion: false
 monitoring_num_inference_steps: 30

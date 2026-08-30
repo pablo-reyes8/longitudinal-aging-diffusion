@@ -278,8 +278,25 @@ def compute_age_delta_embedding(
         values = values[:, 0]
     if values.ndim != 1 or values.shape[0] != batch_size:
         raise ValueError(f"delta_age must have shape [{batch_size}]")
-    if isinstance(conditioner, AgeConditionerV2):
+    get_config = getattr(conditioner, "get_config", None)
+    conditioner_config = get_config() if callable(get_config) else {}
+    input_contract = conditioner_config.get("inputs")
+    if input_contract is None:
+        # ``isinstance`` is only a legacy fallback. In notebooks the same
+        # module can be reloaded, producing two distinct Python class objects
+        # both named AgeConditionerV2; its serialized input contract remains
+        # stable across those reloads.
+        input_contract = (
+            "source_target_delta"
+            if isinstance(conditioner, AgeConditionerV2)
+            else "delta_only"
+        )
+    if input_contract == "source_target_delta":
         if source_age is None or target_age is None:
             raise ValueError("source_age and target_age are required by AgeConditionerV2")
         return conditioner(source_age, target_age, values)
-    return conditioner(values)
+    if input_contract == "delta_only":
+        return conditioner(values)
+    raise ValueError(
+        f"Unsupported age-conditioner input contract: {input_contract!r}"
+    )

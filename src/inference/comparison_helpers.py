@@ -79,8 +79,24 @@ def generate_age_sweep(
         )
         source_age = kwargs.get("source_age")
         source_label = "Original" + (f"\nAge: {source_age}" if source_age is not None else "")
-        images = [source, *images]
-        labels = [source_label, *labels]
+        if source_age is None:
+            images = [source, *images]
+            labels = [source_label, *labels]
+        else:
+            chronological = sorted(
+                zip(ordered_ages, images, labels), key=lambda item: item[0]
+            )
+            source_position = sum(age < float(source_age) for age, _, _ in chronological)
+            ordered_images = [image for _, image, _ in chronological]
+            ordered_labels = [label for _, _, label in chronological]
+            images = [
+                *ordered_images[:source_position], source,
+                *ordered_images[source_position:],
+            ]
+            labels = [
+                *ordered_labels[:source_position], source_label,
+                *ordered_labels[source_position:],
+            ]
     grid = _labeled_grid(images, labels, labels_below=annotate_diagnostics)
     saved = None
     if output_path is not None:

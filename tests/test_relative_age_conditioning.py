@@ -43,6 +43,40 @@ def test_age_delta_conditioner_shape_determinism_variation_zero_and_negative():
     assert torch.isfinite(one_dimensional).all()
 
 
+def test_v2_contract_survives_notebook_style_class_reload():
+    class ReloadedAgeConditionerV2(torch.nn.Module):
+        """V2-compatible object intentionally failing local isinstance checks."""
+
+        def __init__(self):
+            super().__init__()
+            self.inner = AgeConditionerV2(
+                num_fourier_frequencies=2, hidden_dim=8, output_dim=16
+            )
+
+        def get_config(self):
+            return self.inner.get_config()
+
+        def forward(self, source_age, target_age, delta_age):
+            return self.inner(source_age, target_age, delta_age)
+
+    conditioner = ReloadedAgeConditionerV2()
+    assert not isinstance(conditioner, AgeConditionerV2)
+    bundle = {
+        "use_age_delta_conditioning": True,
+        "age_conditioner": conditioner,
+        "age_conditioning_version": "v2_fourier",
+    }
+    output = compute_age_delta_embedding(
+        bundle,
+        torch.tensor([-20.0, 0.0, 20.0]),
+        batch_size=3,
+        source_age=torch.tensor([50.0, 30.0, 20.0]),
+        target_age=torch.tensor([30.0, 30.0, 40.0]),
+    )
+    assert output.shape == (3, 16)
+    assert torch.isfinite(output).all()
+
+
 def test_age_conditioner_v2_fourier_shapes_determinism_and_age_sensitivity():
     torch.manual_seed(71)
     conditioner = AgeConditionerV2(

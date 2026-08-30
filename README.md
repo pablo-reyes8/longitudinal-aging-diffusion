@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-EE4C2C?logo=pytorch&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Tests](https://img.shields.io/badge/tests-258%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-260%20passed-brightgreen)
 
 Supervised photo aging from real longitudinal observations. The project adapts
 Stable Diffusion 1.5 with source-image conditioning, explicit absolute/relative
@@ -144,10 +144,11 @@ To reduce VRAM usage, ArcFace and MiVOLO losses are evaluated every fourth micro
 Training can monitor a single target age or an ordered sweep, e.g.
 
 ```python
-monitoring_target_age = [30, 35, 40, 50, 65]
+monitoring_source_age = 26
+monitoring_target_age = [16, 18, 24, 30, 35, 40, 50, 65]
 ```
 
-Each monitored epoch saves individual generations, an age_sweep.png, and sampling diagnostics containing target age, predicted age, identity cosine similarity, and age-calibration statistics (intercept, slope, R²).
+Each monitored epoch saves individual generations, an age_sweep.png, and sampling diagnostics containing target age, predicted age, identity cosine similarity, and age-calibration statistics (intercept, slope, R²). The grid is chronological: rejuvenation targets appear left of the original and aging targets appear right.
 
 The source image, seed, and guidance settings remain fixed across epochs to make visual comparisons meaningful.
 
