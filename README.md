@@ -128,53 +128,30 @@ aging-train \
   --monitoring-source-age 26
 ```
 
-The baseline uses conservative photo-editing hyperparameters: LoRA `3e-5`,
-expanded input convolution `5e-6`, age conditioner `1e-4`, Min-SNR 5, 5%
-conditioning dropout, a fixed monitoring seed, direct monitoring at strength
-`0.35`, and loss weights `identity=0.20`, `absolute_age=0.05`,
-`relative_age=0.05`. Age Conditioner V2 encodes source age, target age, and
-signed delta with eight Fourier frequency bands, a 256-unit hidden layer, and
-a trainable output gate initialized to `1.0`. Training independently mixes 70%
-numeric target-age prompts with 30% generic aging prompts. It loads frozen
-`py-feat/arcface_r50` and `iitolstykh/mivolo_v2` auxiliaries. The zero-delta
-baseline injects 20% train-only self-pairs, adds decoded L1 preservation with
-weight `0.10` for `|delta_age| <= 2`, and weights diffusion samples `2x` for
-`|delta_age| <= 5`. Validation and test retain only real longitudinal pairs.
-Bidirectional training is enabled in both baseline YAMLs: every canonical
-forward pair remains available, while 20% of non-self observations are shown in
-reverse order (`delta_age < 0`). This is an ordering augmentation, not an 80%
-subsample of the aging data. The loader and trainer flags and probabilities
-must agree, otherwise training stops before allocating the model on the device.
-FG-NET can optionally complement training through `include_kaggle=True` and a
-flat images path. For proportions below `1.0`, the loader adds
-`kaggle_proportion × Colombian epoch observations` and never removes Colombian
-items. Selection fills source/target/gap cells that are scarce in the Colombian
-profile before common cells, balances FG-NET identities, and defaults to 50%
-reverse ordering. The special proportion `1.0` uses every eligible FG-NET pair.
-Validation and test remain Colombian. Every loader build prints primary,
-available FG-NET, selected FG-NET, and combined pair counts.
-To control VRAM, the ArcFace and MiVOLO losses run every fourth training
-microbatch on 25% of eligible samples and use
-activation checkpointing through the VAE and auxiliary networks. See
-[`notebooks/training.ipynb`](notebooks/training.ipynb) for the complete setup.
-Training images should already be face-centered or aligned: a non-differentiable
-face detector is intentionally not inserted into the loss graph.
+The baseline uses conservative photo-editing settings: LoRA `3e-5`, expanded input convolution `5e-6`, age conditioner `1e-4`, Min-SNR `5`, and 5% conditioning dropout. Loss weights are `identity=0.20`, `absolute_age=0.05`, and `relative_age=0.05`.
 
-Training monitoring accepts either one age or an ordered sweep. With
-`monitoring_target_age=[30, 35, 40, 50, 65]`, every sampled epoch writes
-`age_030.png`, `age_035.png`, `age_040.png`, `age_050.png`, `age_065.png`, and
-`age_sweep.png` below `monitoring/epoch_NNN/`. The source image, seed, mode, and
-guidance settings remain fixed across ages and epochs. Direct monitoring uses
-the source-age prompt as the referenced-CFG baseline with
-`age_guidance_scale=3.0`; selecting `text_reference_mode="null"` reproduces the
-legacy CFG equation exactly.
-When ArcFace and MiVOLO are attached, monitoring also annotates the grid with
-target age, predicted age, and source/generated identity cosine. Each epoch
-writes `sampling_diagnostics_epoch_NNN.csv`, while
-`monitoring/sampling_diagnostics_history.csv` appends the complete trajectory.
-The same sweep now fits predicted age delta against requested age delta and
-prints `Age calibration | intercept=... | slope=... | R2=...`. Those three
-values are saved in both diagnostic CSVs without any additional inference pass.
+Age Conditioner V2 encodes source age, target age, and signed age delta using Fourier features. Training mixes numeric target-age prompts (70%) with generic aging prompts (30%) and uses frozen ArcFace and MiVOLO models for identity and age supervision.
+
+The loader supports:
+- **Zero-delta self-pairs:** 20% train-only self-pairs with additional preservation loss and higher diffusion weighting near zero age change.
+- **Bidirectional augmentation:** 20% of non-self training observations are reversed to expose the model to negative age deltas.
+- **Optional FG-NET augmentation:** enabled with `include_kaggle=True`. FG-NET supplements, but never replaces, Colombian training observations. Validation and test remain Colombian.
+
+To reduce VRAM usage, ArcFace and MiVOLO losses are evaluated every fourth microbatch on a subset of eligible samples, with activation checkpointing through the VAE and auxiliary networks.
+
+### Monitoring
+
+Training can monitor a single target age or an ordered sweep, e.g.
+
+```python
+monitoring_target_age = [30, 35, 40, 50, 65]
+```
+
+Each monitored epoch saves individual generations, an age_sweep.png, and sampling diagnostics containing target age, predicted age, identity cosine similarity, and age-calibration statistics (intercept, slope, R²).
+
+The source image, seed, and guidance settings remain fixed across epochs to make visual comparisons meaningful.
+
+See notebooks/training.ipynb for the complete training setup and configuration details.
 
 Resume exactly from a training checkpoint with:
 
