@@ -46,18 +46,33 @@ def _save_annotated_grid(
     source = tensor_to_pil(
         prepare_inference_image(source_image, image_size=image_size).div(2).add(0.5)
     )
-    images = [source, *[result["image"] for result in results]]
-    labels = ["Original" + (f"\nAge: {source_age}" if source_age is not None else "")]
-    for result in results:
+    ordered_results = (
+        sorted(results, key=lambda result: float(result["diagnostics"]["target_age"]))
+        if source_age is not None else list(results)
+    )
+    generated_images = []
+    generated_labels = []
+    for result in ordered_results:
         diagnostics = result["diagnostics"]
         predicted_delta = diagnostics["predicted_delta_age"]
         delta_label = "n/a" if predicted_delta is None else f"{predicted_delta:.1f}"
-        labels.append(
+        generated_images.append(result["image"])
+        generated_labels.append(
             f"Target: {diagnostics['target_age']:.0f}\n"
             f"Pred: {diagnostics['predicted_generated_age']:.1f}\n"
             f"Delta: {delta_label}\n"
             f"ID: {diagnostics['identity_cosine_source_generated']:.2f}"
         )
+    source_label = "Original" + (f"\nAge: {source_age}" if source_age is not None else "")
+    source_position = (
+        sum(
+            float(result["diagnostics"]["target_age"]) < float(source_age)
+            for result in ordered_results
+        )
+        if source_age is not None else 0
+    )
+    images = [*generated_images[:source_position], source, *generated_images[source_position:]]
+    labels = [*generated_labels[:source_position], source_label, *generated_labels[source_position:]]
     width, height = images[0].size
     footer_height = 64
     grid = Image.new("RGB", (width * len(images), height + footer_height), "white")

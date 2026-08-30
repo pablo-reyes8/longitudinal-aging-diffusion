@@ -51,3 +51,4 @@ venv/
 Thumbs.db
 
 PROJECT_CONTEXT_FOR_AI.md
+output/training_notebooks

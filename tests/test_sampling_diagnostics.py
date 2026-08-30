@@ -19,6 +19,7 @@ from src.training import (
     fit_age_response_calibration,
 )
 from src.training.sampling_monitor import run_face_aging_monitor
+from src.inference.checkpoint_diagnostics import _save_annotated_grid
 from training_fakes import make_training_bundle
 
 
@@ -191,6 +192,41 @@ def test_checkpoint_diagnostic_age_error_and_generation_match_normal_inference(t
         assert list(saved.getdata()) == list(normal["image"].getdata())
     assert (output_dir / "age_sweep.png").exists()
     assert (output_dir / "sampling_diagnostics.csv").exists()
+
+
+def test_checkpoint_grid_places_rejuvenation_before_source_and_aging_after(tmp_path):
+    colors = {
+        65: (255, 0, 0),
+        16: (0, 255, 0),
+        35: (0, 0, 255),
+    }
+    results = [
+        {
+            "image": Image.new("RGB", (16, 16), colors[age]),
+            "diagnostics": {
+                "target_age": float(age),
+                "predicted_generated_age": float(age),
+                "predicted_delta_age": float(age - 30),
+                "identity_cosine_source_generated": 1.0,
+            },
+        }
+        for age in (65, 16, 35)  # deliberately not chronological
+    ]
+    path = _save_annotated_grid(
+        source_image=Image.new("RGB", (16, 16), (0, 0, 0)),
+        source_age=30,
+        results=results,
+        image_size=16,
+        output_path=tmp_path / "ordered.png",
+    )
+    with Image.open(path) as grid:
+        assert grid.size == (64, 80)
+        assert [grid.getpixel((8 + 16 * index, 8)) for index in range(4)] == [
+            colors[16],
+            (0, 0, 0),
+            colors[35],
+            colors[65],
+        ]
 
 
 def test_conditioning_isolation_runs_nine_matched_cases_without_writing(tmp_path, capsys):
