@@ -9,7 +9,7 @@ from pathlib import Path
 
 import torch
 
-from .age_calibration import fit_age_response_calibration
+from .age_calibration import compute_directional_age_metrics, fit_age_response_calibration
 
 
 DIAGNOSTIC_CSV_FIELDS = [
@@ -17,6 +17,7 @@ DIAGNOSTIC_CSV_FIELDS = [
     "predicted_generated_age", "predicted_delta_age", "age_error", "delta_age_error",
     "identity_cosine", "mode", "text_reference_mode", "age_guidance_scale", "seed",
     "age_calibration_intercept", "age_calibration_slope", "age_calibration_r2",
+    "age_calibration_score",
 ]
 
 
@@ -145,6 +146,7 @@ def run_face_aging_monitor(
             if row is not None:
                 diagnostic_rows.append(row)
         calibration = fit_age_response_calibration(diagnostic_rows)
+        directional = compute_directional_age_metrics(diagnostic_rows)
         if calibration is not None:
             for row in diagnostic_rows:
                 row.update(calibration)
@@ -152,10 +154,23 @@ def run_face_aging_monitor(
                 " Age calibration | "
                 f"intercept={calibration['age_calibration_intercept']:.4f} | "
                 f"slope={calibration['age_calibration_slope']:.4f} | "
-                f"R2={calibration['age_calibration_r2']:.4f}"
+                f"R2={calibration['age_calibration_r2']:.4f} | "
+                f"score={calibration['age_calibration_score']:.4f}"
             )
         elif compute_diagnostics:
             print(" Age calibration | unavailable (need MiVOLO diagnostics at >=2 distinct ages)")
+        if diagnostic_rows:
+            formatted = {
+                key: "n/a" if value is None else f"{value:.4f}"
+                for key, value in directional.items()
+            }
+            print(
+                " Age direction   | "
+                f"forward_MAE={formatted['forward_mae']} | "
+                f"forward_bias={formatted['forward_bias']} | "
+                f"reverse_MAE={formatted['reverse_mae']} | "
+                f"reverse_bias={formatted['reverse_bias']}"
+            )
         epoch_csv, history_csv = _write_diagnostic_csvs(
             diagnostic_rows, epoch=epoch, epoch_dir=epoch_dir, history_dir=Path(output_dir)
         )
@@ -169,6 +184,7 @@ def run_face_aging_monitor(
             "diagnostics_csv": str(epoch_csv) if epoch_csv else None,
             "diagnostics_history_csv": str(history_csv) if history_csv else None,
             "age_calibration": calibration,
+            "age_direction": directional,
         }
 
     result = infer_face_aging(

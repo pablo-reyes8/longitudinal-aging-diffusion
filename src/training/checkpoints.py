@@ -137,6 +137,8 @@ def build_training_payload(
     history: dict, training_config: dict,
     training_generator_state: torch.Tensor | None = None,
     dataloader_generator_state: torch.Tensor | None = None,
+    best_calibration_score: float | None = None,
+    best_calibration_epoch: int | None = None,
 ) -> dict[str, Any]:
     return {
         "format_version": 1,
@@ -151,6 +153,8 @@ def build_training_payload(
         "optimizer_step": int(optimizer_step),
         "best_metric": best_metric,
         "best_epoch": best_epoch,
+        "best_calibration_score": best_calibration_score,
+        "best_calibration_epoch": best_calibration_epoch,
         "history": history,
         "bundle_config": _bundle_config(bundle),
         "loss_config": loss_fn.get_config() if hasattr(loss_fn, "get_config") else None,
@@ -219,6 +223,9 @@ class TrainingCheckpointManager:
         self.max_epoch_checkpoints = max_epoch_checkpoints
         self.best_metric: float | None = None
         self.best_epoch: int | None = None
+        self.best_calibration_score: float | None = None
+        self.best_calibration_epoch: int | None = None
+        self.latest_epoch: int | None = None
 
     def is_improved(self, metric: float) -> bool:
         return self.best_metric is None or (metric < self.best_metric if self.mode == "min" else metric > self.best_metric)
@@ -239,6 +246,15 @@ class TrainingCheckpointManager:
                     file.unlink()
                 directory.rmdir()
 
+    def _save_state(self) -> None:
+        atomic_json_save({
+            "monitor": self.monitor, "mode": self.mode,
+            "best_metric": self.best_metric, "best_epoch": self.best_epoch,
+            "best_calibration_score": self.best_calibration_score,
+            "best_calibration_epoch": self.best_calibration_epoch,
+            "latest_epoch": self.latest_epoch,
+        }, self.root_dir / "checkpoint_state.json")
+
     def save(self, *, training_payload, inference_payload, epoch: int, metric: float) -> dict[str, Any]:
         improved = self.is_improved(metric)
         latest = self._write_pair(self.root_dir / "latest", training_payload, inference_payload)
@@ -250,12 +266,48 @@ class TrainingCheckpointManager:
         if self.save_epoch_checkpoints:
             snapshot = self._write_pair(self.root_dir / f"epoch_{epoch + 1:03d}", training_payload, inference_payload)
             self._prune_epochs()
-        atomic_json_save({
-            "monitor": self.monitor, "mode": self.mode,
-            "best_metric": self.best_metric, "best_epoch": self.best_epoch,
-            "latest_epoch": epoch,
-        }, self.root_dir / "checkpoint_state.json")
+        self.latest_epoch = int(epoch)
+        self._save_state()
         return {"latest": latest, "best": best, "snapshot": snapshot, "improved": improved}
+
+    def save_calibration(
+        self, *, training_payload, inference_payload, epoch: int, score: float,
+    ) -> dict[str, Any]:
+        """Save an independent lower-is-better calibration checkpoint."""
+        score = float(score)
+        improved = self.best_calibration_score is None or score < self.best_calibration_score
+        checkpoint = None
+        if improved:
+            self.best_calibration_score = score
+            self.best_calibration_epoch = int(epoch)
+            training_payload["best_calibration_score"] = self.best_calibration_score
+            training_payload["best_calibration_epoch"] = self.best_calibration_epoch
+            checkpoint = self._write_pair(
+                self.root_dir / "best_calibration_checkpoint",
+                training_payload,
+                inference_payload,
+            )
+        training_payload["best_calibration_score"] = self.best_calibration_score
+        training_payload["best_calibration_epoch"] = self.best_calibration_epoch
+        # Validation is intentionally saved before the expensive sampling sweep.
+        # Refresh only resume metadata for same-epoch validation checkpoints so
+        # resuming from ``latest`` or ``best`` retains the calibration optimum.
+        if self.latest_epoch == int(epoch):
+            atomic_torch_save(
+                training_payload, self.root_dir / "latest" / "training_resume.pt"
+            )
+        if self.best_epoch == int(epoch):
+            atomic_torch_save(
+                training_payload, self.root_dir / "best" / "training_resume.pt"
+            )
+        self._save_state()
+        return {
+            "checkpoint": checkpoint,
+            "improved": improved,
+            "score": score,
+            "best_score": self.best_calibration_score,
+            "best_epoch": self.best_calibration_epoch,
+        }
 
     def load_manager_state(self) -> None:
         path = self.root_dir / "checkpoint_state.json"
@@ -263,3 +315,6 @@ class TrainingCheckpointManager:
             state = json.loads(path.read_text(encoding="utf-8"))
             self.best_metric = state.get("best_metric")
             self.best_epoch = state.get("best_epoch")
+            self.best_calibration_score = state.get("best_calibration_score")
+            self.best_calibration_epoch = state.get("best_calibration_epoch")
+            self.latest_epoch = state.get("latest_epoch")

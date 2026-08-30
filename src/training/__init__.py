@@ -9,7 +9,7 @@ from .checkpoints import (
     load_training_checkpoint,
 )
 from .conditioning_dropout import apply_conditioning_dropout, sample_conditioning_dropout
-from .age_calibration import fit_age_response_calibration
+from .age_calibration import compute_directional_age_metrics, fit_age_response_calibration
 from .metrics import AverageMeter, MetricsTracker
 from .mixed_precision import (
     autocast_ctx,

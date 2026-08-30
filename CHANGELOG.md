@@ -38,3 +38,5 @@ to use semantic versioning after its first stable release.
   rejuvenation targets left of the source image and aging targets to its right.
 - Reload-safe Age Conditioner V2 dispatch based on its serialized input
   contract, preventing notebook module reloads from being mistaken for V1.
+- Parallel calibration-aware checkpoint selection plus forward/reverse age-error
+  diagnostics, reusing the existing monitoring sweep without extra inference.

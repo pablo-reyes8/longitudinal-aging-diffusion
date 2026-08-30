@@ -16,6 +16,7 @@ from src.loss import AgeEstimatorAdapter, IdentityEncoderAdapter
 from src.training import (
     atomic_torch_save,
     build_inference_payload,
+    compute_directional_age_metrics,
     fit_age_response_calibration,
 )
 from src.training.sampling_monitor import run_face_aging_monitor
@@ -94,13 +95,16 @@ def test_training_sweep_writes_epoch_rows_appends_history_and_calibration(tmp_pa
         assert frame["age_calibration_intercept"].nunique() == 1
         assert frame["age_calibration_slope"].nunique() == 1
         assert frame["age_calibration_r2"].nunique() == 1
+        assert frame["age_calibration_score"].nunique() == 1
         assert report["age_calibration"] is not None
+        assert report["age_direction"]["forward_mae"] is not None
         assert report["diagnostics_csv"] == str(epoch_csv)
     history = pd.read_csv(tmp_path / "sampling_diagnostics_history.csv")
     assert len(history) == 6
     assert history.groupby("epoch").size().to_dict() == {1: 3, 2: 3}
     printed = capsys.readouterr().out
     assert printed.count("Age calibration | intercept=") == 2
+    assert printed.count("Age direction   | forward_MAE=") == 2
 
 
 def test_age_response_calibration_exact_linear_oracle_and_edge_cases():
@@ -113,12 +117,29 @@ def test_age_response_calibration_exact_linear_oracle_and_edge_cases():
         "age_calibration_intercept": 3.0,
         "age_calibration_slope": 1.25,
         "age_calibration_r2": 1.0,
+        "age_calibration_score": 5.5,
     })
     assert fit_age_response_calibration(rows[:1]) is None
     assert fit_age_response_calibration([
         {"target_delta_age": 5, "predicted_delta_age": 1},
         {"target_delta_age": 5, "predicted_delta_age": 2},
     ]) is None
+
+
+def test_directional_age_metrics_exact_oracle_ignores_zero_delta():
+    metrics = compute_directional_age_metrics([
+        {"target_delta_age": 10, "predicted_delta_age": 8},
+        {"target_delta_age": 20, "predicted_delta_age": 24},
+        {"target_delta_age": -10, "predicted_delta_age": -7},
+        {"target_delta_age": -20, "predicted_delta_age": -25},
+        {"target_delta_age": 0, "predicted_delta_age": 99},
+    ])
+    assert metrics == pytest.approx({
+        "forward_mae": 3.0,
+        "forward_bias": 1.0,
+        "reverse_mae": 4.0,
+        "reverse_bias": -1.0,
+    })
 
 
 def test_monitoring_history_migrates_old_csv_schema(tmp_path):
@@ -141,10 +162,11 @@ def test_monitoring_history_migrates_old_csv_schema(tmp_path):
         image_size=32,
     )
     history = pd.read_csv(history_path)
-    assert list(history.columns)[-3:] == [
+    assert list(history.columns)[-4:] == [
         "age_calibration_intercept",
         "age_calibration_slope",
         "age_calibration_r2",
+        "age_calibration_score",
     ]
     assert len(history) == 4
     assert report["age_calibration"] is not None

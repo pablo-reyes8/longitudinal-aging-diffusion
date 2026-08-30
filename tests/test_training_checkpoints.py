@@ -118,3 +118,40 @@ def test_best_logic_and_epoch_retention(tmp_path, mode, values, expected_epochs)
     assert {path.name for path in tmp_path.glob("epoch_*" )} == {"epoch_005", "epoch_006", "epoch_007"}
     assert (tmp_path / "latest" / "training_resume.pt").exists()
     assert (tmp_path / "best" / "training_resume.pt").exists()
+
+
+def test_calibration_checkpoint_is_parallel_lower_is_better_and_reloadable(tmp_path):
+    manager = TrainingCheckpointManager(tmp_path, save_epoch_checkpoints=False)
+    improved = []
+    for epoch, score in enumerate((8.0, 9.0, 4.0)):
+        manager.save(
+            training_payload={"kind": "validation", "epoch": epoch},
+            inference_payload={"kind": "validation", "epoch": epoch},
+            epoch=epoch,
+            metric=0.5 + epoch,
+        )
+        report = manager.save_calibration(
+            training_payload={"epoch": epoch},
+            inference_payload={"epoch": epoch},
+            epoch=epoch,
+            score=score,
+        )
+        improved.append(report["improved"])
+
+    assert improved == [True, False, True]
+    assert manager.best_metric == 0.5
+    assert manager.best_calibration_score == 4.0
+    calibration_dir = tmp_path / "best_calibration_checkpoint"
+    assert torch.load(calibration_dir / "adapter_inference.pt", weights_only=True)["epoch"] == 2
+    resume = torch.load(calibration_dir / "training_resume.pt", weights_only=True)
+    assert resume["best_calibration_score"] == 4.0
+    assert resume["best_calibration_epoch"] == 2
+    assert torch.load(tmp_path / "best" / "adapter_inference.pt", weights_only=True)["kind"] == "validation"
+    latest_resume = torch.load(tmp_path / "latest" / "training_resume.pt", weights_only=True)
+    assert latest_resume["best_calibration_score"] == 4.0
+
+    restored = TrainingCheckpointManager(tmp_path)
+    restored.load_manager_state()
+    assert restored.best_metric == 0.5
+    assert restored.best_calibration_score == 4.0
+    assert restored.best_calibration_epoch == 2

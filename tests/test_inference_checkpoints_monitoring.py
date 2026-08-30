@@ -80,16 +80,22 @@ def test_training_builtin_inverse_monitor_uses_same_image_and_writes_each_epoch(
         amp_enabled=False, device="cpu", gradient_checkpointing=False, enable_xformers=False,
         min_snr_gamma=None, sample_target_posterior=False, log_every=0,
         checkpoint_dir=tmp_path / "checkpoints", sample_every_epochs=1,
-        monitoring_image=monitor_image, monitoring_target_age=65, monitoring_source_age=30,
+        monitoring_image=monitor_image, monitoring_target_age=[20, 65], monitoring_source_age=30,
         monitoring_use_inverse_diffusion=True, monitoring_num_inference_steps=3,
         monitoring_seed=444, image_size=32,
     )
     monitoring = tmp_path / "checkpoints" / "monitoring"
-    assert (monitoring / "epoch_001.png").exists() and (monitoring / "epoch_002.png").exists()
+    assert (monitoring / "epoch_001" / "age_sweep.png").exists()
+    assert (monitoring / "epoch_002" / "age_sweep.png").exists()
     reports = [epoch["sampling"] for epoch in result["history"]["epochs"]]
     assert all(report["status"] == "PASSED" for report in reports)
     assert all(report["result"]["mode"] == "inverse" for report in reports)
     assert all(report["result"]["seed"] == 444 for report in reports)
+    calibration_dir = tmp_path / "checkpoints" / "best_calibration_checkpoint"
+    assert (calibration_dir / "training_resume.pt").exists()
+    assert (calibration_dir / "adapter_inference.pt").exists()
+    assert result["best_calibration_score"] is not None
+    assert all(epoch["calibration_checkpoint"] is not None for epoch in result["history"]["epochs"])
 
 
 def test_monitoring_age_list_writes_ordered_images_and_grid(tmp_path):

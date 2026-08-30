@@ -547,8 +547,14 @@ def train_model(
         if payload.get("dataloader_generator_state") is not None and getattr(train_loader, "generator", None) is not None:
             train_loader.generator.set_state(payload["dataloader_generator_state"])
         if manager is not None:
+            manager.load_manager_state()
             manager.best_metric = payload.get("best_metric")
             manager.best_epoch = payload.get("best_epoch")
+            saved_calibration_score = payload.get("best_calibration_score")
+            saved_calibration_epoch = payload.get("best_calibration_epoch")
+            if saved_calibration_score is not None or manager.best_calibration_score is None:
+                manager.best_calibration_score = saved_calibration_score
+                manager.best_calibration_epoch = saved_calibration_epoch
         print(f"[resume] epoch={start_epoch + 1}  global_step={global_step}  optimizer_step={optimizer_step}")
     last_epoch = start_epoch - 1
     try:
@@ -617,6 +623,8 @@ def train_model(
                     optimizer_step=optimizer_step,
                     best_metric=monitored if improved else manager.best_metric,
                     best_epoch=epoch if improved else manager.best_epoch,
+                    best_calibration_score=manager.best_calibration_score,
+                    best_calibration_epoch=manager.best_calibration_epoch,
                     history=history, training_config=training_config,
                     training_generator_state=train_generator.get_state(),
                     dataloader_generator_state=train_loader.generator.get_state() if getattr(train_loader, "generator", None) is not None else None,
@@ -656,6 +664,58 @@ def train_model(
                 )
             epoch_record["checkpoint"] = checkpoint_report
             epoch_record["sampling"] = sampling_report
+            calibration_checkpoint_report = None
+            sampling_result = (
+                sampling_report.get("result", sampling_report)
+                if isinstance(sampling_report, dict) else None
+            )
+            calibration = (
+                sampling_result.get("age_calibration")
+                if isinstance(sampling_result, dict) else None
+            )
+            calibration_score = (
+                calibration.get("age_calibration_score")
+                if isinstance(calibration, dict) else None
+            )
+            if manager is not None and calibration_score is not None:
+                calibration_improved = (
+                    manager.best_calibration_score is None
+                    or float(calibration_score) < manager.best_calibration_score
+                )
+                epoch_record["calibration_checkpoint"] = {
+                    "score": float(calibration_score),
+                    "improved": calibration_improved,
+                }
+                calibration_payload = build_training_payload(
+                    bundle=bundle, loss_fn=loss_fn, optimizer=optimizer,
+                    lr_scheduler=lr_scheduler, scaler=precision["scaler"],
+                    epoch=epoch, batch_position=0, global_step=global_step,
+                    optimizer_step=optimizer_step,
+                    best_metric=manager.best_metric, best_epoch=manager.best_epoch,
+                    best_calibration_score=(
+                        float(calibration_score) if calibration_improved
+                        else manager.best_calibration_score
+                    ),
+                    best_calibration_epoch=(
+                        epoch if calibration_improved else manager.best_calibration_epoch
+                    ),
+                    history=history, training_config=training_config,
+                    training_generator_state=train_generator.get_state(),
+                    dataloader_generator_state=(
+                        train_loader.generator.get_state()
+                        if getattr(train_loader, "generator", None) is not None else None
+                    ),
+                )
+                calibration_checkpoint_report = manager.save_calibration(
+                    training_payload=calibration_payload,
+                    inference_payload=build_inference_payload(bundle, training_config),
+                    epoch=epoch,
+                    score=float(calibration_score),
+                )
+                epoch_record["calibration_checkpoint"] = calibration_checkpoint_report
+                atomic_json_save(history, manager.root_dir / "history.json")
+            else:
+                epoch_record["calibration_checkpoint"] = None
             validation_value = val_result["metrics"].get("val/loss_total") if val_result else None
             validation_text = f"{validation_value:.4f}" if validation_value is not None else "not_run"
             epoch_duration = float(epoch_record["duration_seconds"])
@@ -665,6 +725,11 @@ def train_model(
                 if checkpoint_report.get("improved"):
                     checkpoint_status += " (new best)"
             sampling_status = "saved" if sampling_report is not None else "not scheduled"
+            calibration_status = "not available"
+            if calibration_checkpoint_report is not None:
+                calibration_status = f"score={calibration_checkpoint_report['score']:.4f}"
+                if calibration_checkpoint_report["improved"]:
+                    calibration_status += " (new best)"
             print("-" * 104)
             print(
                 f" Epoch {epoch + 1:02d}/{epochs_to_run:02d} complete  |  "
@@ -678,6 +743,7 @@ def train_model(
                 f" Checkpoint: {checkpoint_status}  |  Monitoring: {sampling_status}  |  "
                 f"Best {monitor}: {best_text}"
             )
+            print(f" Calibration checkpoint: {calibration_status}")
             print("-" * 104 + "\n")
     except KeyboardInterrupt:
         if root is not None:
@@ -687,6 +753,8 @@ def train_model(
                 epoch=max(last_epoch, 0), batch_position=0,
                 global_step=global_step, optimizer_step=optimizer_step,
                 best_metric=manager.best_metric, best_epoch=manager.best_epoch,
+                best_calibration_score=manager.best_calibration_score,
+                best_calibration_epoch=manager.best_calibration_epoch,
                 history=history, training_config=training_config,
                 training_generator_state=train_generator.get_state(),
                 dataloader_generator_state=train_loader.generator.get_state() if getattr(train_loader, "generator", None) is not None else None,
@@ -711,6 +779,8 @@ def train_model(
         "global_step": global_step, "optimizer_step": optimizer_step,
         "best_metric": manager.best_metric if manager else None,
         "best_epoch": manager.best_epoch if manager else None,
+        "best_calibration_score": manager.best_calibration_score if manager else None,
+        "best_calibration_epoch": manager.best_calibration_epoch if manager else None,
     })
     if manager is not None:
         atomic_json_save(history, manager.root_dir / "history.json")
@@ -720,6 +790,8 @@ def train_model(
         "optimizer_step": optimizer_step,
         "best_metric": manager.best_metric if manager else None,
         "best_epoch": manager.best_epoch if manager else None,
+        "best_calibration_score": manager.best_calibration_score if manager else None,
+        "best_calibration_epoch": manager.best_calibration_epoch if manager else None,
         "optimizer": optimizer,
         "lr_scheduler": lr_scheduler,
         "scaler": precision["scaler"],
