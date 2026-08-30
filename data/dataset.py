@@ -67,6 +67,7 @@ class FaceAgingDataset(Dataset):
         zero_delta_pair_prob: float = 0.20,
         include_bidirectional_pairs: bool = False,
         reverse_pair_prob: float = 0.20,
+        add_reverse_pairs: bool = False,
         pair_records: Sequence[PairRecord] | None = None,
         seed: int = 42,
     ) -> None:
@@ -89,7 +90,8 @@ class FaceAgingDataset(Dataset):
         self.horizontal_flip_prob = horizontal_flip_prob
         self.include_zero_delta_pairs = bool(include_zero_delta_pairs)
         self.zero_delta_pair_prob = float(zero_delta_pair_prob)
-        self.include_bidirectional_pairs = bool(include_bidirectional_pairs)
+        self.add_reverse_pairs = bool(add_reverse_pairs)
+        self.include_bidirectional_pairs = bool(include_bidirectional_pairs or self.add_reverse_pairs)
         self.reverse_pair_prob = float(reverse_pair_prob)
         self.seed = seed
         # A shared tensor propagates set_epoch() to persistent DataLoader workers.
@@ -103,9 +105,22 @@ class FaceAgingDataset(Dataset):
         self._source_candidates = [
             (source_index, tuple(candidates[source_index])) for source_index in sorted(candidates)
         ]
+        self._base_observations = (
+            len(self.all_pairs) if self.pair_strategy == "all" else len(self._source_candidates)
+        )
+        self._additive_reverse_indices = (
+            [
+                index
+                for index in range(self._base_observations)
+                if _stable_uint64(self.seed, index, "add_reverse_pair") / 2**64
+                < self.reverse_pair_prob
+            ]
+            if self.add_reverse_pairs and self.include_bidirectional_pairs
+            else []
+        )
 
     def __len__(self) -> int:
-        return len(self.all_pairs) if self.pair_strategy == "all" else len(self._source_candidates)
+        return self._base_observations + len(self._additive_reverse_indices)
 
     def set_epoch(self, epoch: int) -> None:
         self._shared_epoch.fill_(int(epoch))
@@ -115,6 +130,10 @@ class FaceAgingDataset(Dataset):
         return int(self._shared_epoch.item())
 
     def pair_for_index(self, index: int) -> PairRecord:
+        additive_reverse = False
+        if self.add_reverse_pairs and index >= self._base_observations:
+            index = self._additive_reverse_indices[index - self._base_observations]
+            additive_reverse = True
         if self.pair_strategy == "all":
             pair = self.all_pairs[index]
         else:
@@ -141,7 +160,18 @@ class FaceAgingDataset(Dataset):
                 source_path=source.relative_path,
                 target_path=source.relative_path,
             )
-        if self.include_bidirectional_pairs:
+        if additive_reverse:
+            return PairRecord(
+                person_id=pair.person_id,
+                source_index=pair.target_index,
+                target_index=pair.source_index,
+                source_age=pair.target_age,
+                target_age=pair.source_age,
+                delta_age=-pair.delta_age,
+                source_path=pair.target_path,
+                target_path=pair.source_path,
+            )
+        if self.include_bidirectional_pairs and not self.add_reverse_pairs:
             reverse_draw = _stable_uint64(
                 self.seed, self.epoch, index, "reverse_pair"
             ) / 2**64
@@ -208,6 +238,7 @@ class CombinedFaceAgingDataset(Dataset):
         self.zero_delta_pair_prob = primary.zero_delta_pair_prob
         self.include_bidirectional_pairs = primary.include_bidirectional_pairs
         self.reverse_pair_prob = primary.reverse_pair_prob
+        self.add_reverse_pairs = primary.add_reverse_pairs
         self.kaggle_reverse_pair_prob = complementary.reverse_pair_prob
         self.training_identity_count = (
             len({row.person_id for row in primary.manifest})

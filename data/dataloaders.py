@@ -50,6 +50,7 @@ def build_face_aging_dataloaders(
     zero_delta_pair_prob: float = 0.20,
     include_bidirectional_pairs: bool = False,
     reverse_pair_prob: float = 0.20,
+    add_reverse_pairs: bool = False,
     include_kaggle: bool = False,
     kaggle_path: str | Path | None = None,
     kaggle_proportion: float = 0.40,
@@ -125,6 +126,7 @@ def build_face_aging_dataloaders(
                 include_bidirectional_pairs if split == "train" else False
             ),
             reverse_pair_prob=reverse_pair_prob,
+            add_reverse_pairs=add_reverse_pairs if split == "train" else False,
             seed=seed + split_index,
         )
         if split == "train" and include_kaggle:
@@ -167,6 +169,7 @@ def build_face_aging_dataloaders(
                 zero_delta_pair_prob=0.0,
                 include_bidirectional_pairs=include_bidirectional_pairs,
                 reverse_pair_prob=kaggle_reverse_pair_prob,
+                add_reverse_pairs=add_reverse_pairs,
                 pair_records=selected_pairs,
                 seed=seed + 10_000,
             )
@@ -181,7 +184,9 @@ def build_face_aging_dataloaders(
                 **selection_audit,
                 "enabled": True,
                 "reverse_pair_prob": (
-                    float(kaggle_reverse_pair_prob) if include_bidirectional_pairs else 0.0
+                    float(kaggle_reverse_pair_prob)
+                    if include_bidirectional_pairs or add_reverse_pairs
+                    else 0.0
                 ),
             })
         datasets[split] = dataset
@@ -223,8 +228,9 @@ def build_face_aging_dataloaders(
             "prompt_style": prompt_style,
             "include_zero_delta_pairs": bool(include_zero_delta_pairs),
             "zero_delta_pair_prob": float(zero_delta_pair_prob),
-            "include_bidirectional_pairs": bool(include_bidirectional_pairs),
+            "include_bidirectional_pairs": bool(include_bidirectional_pairs or add_reverse_pairs),
             "reverse_pair_prob": float(reverse_pair_prob),
+            "add_reverse_pairs": bool(add_reverse_pairs),
             "include_kaggle": bool(include_kaggle),
             "kaggle_path": str(Path(kaggle_path).expanduser().resolve()) if kaggle_path else None,
             "kaggle_proportion": float(kaggle_proportion),
