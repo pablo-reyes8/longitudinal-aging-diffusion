@@ -152,7 +152,7 @@ Each monitored epoch saves individual generations, an age_sweep.png, and samplin
 
 Forward and reverse calibration fits are tracked independently. A default multi-strength diagnostic (`0.20`, `0.27`, `0.35`, `0.40`) is saved as one native-resolution PNG plus one compact summary CSV; it does not create per-strength image trees. Optional reverse-only relative-loss weighting and delta-dependent inference strength remain disabled by default.
 
-Checkpoint selection keeps two independent best models: `best/` follows validation loss, while `best_calibration_checkpoint/` minimizes `|intercept| + 10|slope - 1|` from the existing monitoring sweep.
+Checkpoint selection keeps two independent best models: `best/` follows validation loss, while `best_calibration_checkpoint/` minimizes `|intercept - (-3.19)| + 10|slope - 0.84|` against the real longitudinal MiVOLO benchmark. Reference identity cosine is `mean=0.532`, `median=0.589`; identity reporting itself is unchanged.
 
 The source image, seed, and guidance settings remain fixed across epochs to make visual comparisons meaningful.
 

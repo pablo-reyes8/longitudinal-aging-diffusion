@@ -6,6 +6,12 @@ import math
 from collections.abc import Iterable, Mapping
 
 
+TARGET_INTERCEPT = -3.19
+TARGET_SLOPE = 0.84
+REAL_IDENTITY_MEAN = 0.532
+REAL_IDENTITY_MEDIAN = 0.589
+
+
 def fit_age_response_calibration(rows: Iterable[Mapping]) -> dict[str, float] | None:
     """Fit predicted delta = intercept + slope * requested delta.
 
@@ -35,7 +41,10 @@ def fit_age_response_calibration(rows: Iterable[Mapping]) -> dict[str, float] | 
     r2 = (
         1.0 if residual_sum <= 1e-12 else 0.0
     ) if total_sum <= 1e-12 else 1.0 - residual_sum / total_sum
-    score = abs(intercept) + 10.0 * abs(slope - 1.0)
+    score = (
+        abs(intercept - TARGET_INTERCEPT)
+        + 10.0 * abs(slope - TARGET_SLOPE)
+    )
     return {
         "age_calibration_intercept": float(intercept),
         "age_calibration_slope": float(slope),

@@ -17,6 +17,10 @@ from src.inference import (
 )
 from src.loss import AgeEstimatorAdapter, IdentityEncoderAdapter
 from src.training import (
+    REAL_IDENTITY_MEAN,
+    REAL_IDENTITY_MEDIAN,
+    TARGET_INTERCEPT,
+    TARGET_SLOPE,
     atomic_torch_save,
     build_inference_payload,
     compute_directional_age_metrics,
@@ -130,8 +134,15 @@ def test_age_response_calibration_exact_linear_oracle_and_edge_cases():
         "age_calibration_intercept": 3.0,
         "age_calibration_slope": 1.25,
         "age_calibration_r2": 1.0,
-        "age_calibration_score": 5.5,
+        "age_calibration_score": 10.29,
     })
+    assert (TARGET_INTERCEPT, TARGET_SLOPE) == (-3.19, 0.84)
+    assert (REAL_IDENTITY_MEAN, REAL_IDENTITY_MEDIAN) == (0.532, 0.589)
+    target_fit = fit_age_response_calibration([
+        {"target_delta_age": x, "predicted_delta_age": TARGET_INTERCEPT + TARGET_SLOPE * x}
+        for x in (-20, 0, 20)
+    ])
+    assert target_fit["age_calibration_score"] == pytest.approx(0.0, abs=1e-12)
     assert fit_age_response_calibration(rows[:1]) is None
     assert fit_age_response_calibration([
         {"target_delta_age": 5, "predicted_delta_age": 1},

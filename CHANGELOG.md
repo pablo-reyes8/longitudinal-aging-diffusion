@@ -43,3 +43,5 @@ to use semantic versioning after its first stable release.
 - Separate forward/reverse calibration fits, optional reverse-relative loss
   weighting, optional delta-dependent inference strength, and one-grid
   multi-strength epoch diagnostics.
+- Calibration checkpoint scoring centered on real longitudinal MiVOLO
+  references (`intercept=-3.19`, `slope=0.84`) with recorded identity baselines.
