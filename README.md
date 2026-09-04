@@ -266,18 +266,6 @@ oracles. Real SD1.5/GPU qualitative validation is intentionally reported as
 `NOT RUN` when weights are unavailable—it is never silently replaced by a fake
 success.
 
-## Privacy and responsible use
-
-Face images are sensitive biometric data. Use data with appropriate consent and
-legal authority, minimize retention, restrict checkpoint access, and document
-demographic coverage and known limitations. Generated ages are synthetic visual
-edits, not medical predictions or verified future appearances.
-
-The pretrained `py-feat/arcface_r50` weights inherit InsightFace's
-non-commercial-research restriction; the repository's MIT license does not
-override that model license. MiVOLO V2 is loaded with Hugging Face
-`trust_remote_code=True`; review and pin its repository revision for controlled
-or long-lived training runs.
 
 ## Contributing and license
 
