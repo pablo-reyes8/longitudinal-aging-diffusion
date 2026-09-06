@@ -7,7 +7,7 @@ from typing import Iterable, Sequence
 
 from PIL import Image, ImageDraw
 
-from .infer_face_aging import infer_face_aging
+from .infer_face_aging import generate_aged_face_adaptive_strength, infer_face_aging
 from .inference_utils import prepare_inference_image, tensor_to_pil
 
 
@@ -109,6 +109,78 @@ def generate_age_sweep(
         saved.parent.mkdir(parents=True, exist_ok=True)
         grid.save(saved)
     return {"ages": ordered_ages, "results": results, "grid": grid, "output_path": saved}
+
+
+def generate_adaptive_age_sweep(
+    *, bundle, image, ages: Iterable[int], output_path: str | Path | None = None,
+    strength_map=None, annotate_diagnostics: bool = False,
+    include_source: bool = False, **kwargs,
+):
+    """Render one age strip using one threshold-resolved strength per target."""
+    ordered_ages = [int(age) for age in ages]
+    if not ordered_ages:
+        raise ValueError("ages must not be empty")
+    if annotate_diagnostics:
+        kwargs["compute_diagnostics"] = True
+    results = [
+        generate_aged_face_adaptive_strength(
+            bundle=bundle,
+            image=image,
+            target_age=age,
+            strength_map=strength_map,
+            **kwargs,
+        )
+        for age in ordered_ages
+    ]
+    labels = (
+        [_age_diagnostic_label(result) for result in results]
+        if annotate_diagnostics else [
+            f"Target: {age}\nStrength: {result['effective_strength']:.3f}"
+            for age, result in zip(ordered_ages, results)
+        ]
+    )
+    images = [result["image"] for result in results]
+    if include_source:
+        source = tensor_to_pil(
+            prepare_inference_image(
+                image, image_size=kwargs.get("image_size", 256)
+            ).div(2).add(0.5)
+        )
+        source_age = kwargs.get("source_age")
+        source_label = "Original" + (f"\nAge: {source_age}" if source_age is not None else "")
+        if source_age is None:
+            images = [source, *images]
+            labels = [source_label, *labels]
+        else:
+            chronological = sorted(
+                zip(ordered_ages, images, labels), key=lambda item: item[0]
+            )
+            source_position = sum(age < float(source_age) for age, _, _ in chronological)
+            ordered_images = [item[1] for item in chronological]
+            ordered_labels = [item[2] for item in chronological]
+            images = [
+                *ordered_images[:source_position], source,
+                *ordered_images[source_position:],
+            ]
+            labels = [
+                *ordered_labels[:source_position], source_label,
+                *ordered_labels[source_position:],
+            ]
+    grid = _labeled_grid(images, labels, labels_below=annotate_diagnostics)
+    saved = None
+    if output_path is not None:
+        saved = Path(output_path)
+        saved.parent.mkdir(parents=True, exist_ok=True)
+        grid.save(saved)
+    return {
+        "ages": ordered_ages,
+        "results": results,
+        "grid": grid,
+        "output_path": saved,
+        "strength_map": dict(
+            results[0]["metadata"]["strength_map"]
+        ),
+    }
 
 
 def generate_strength_age_sweep(

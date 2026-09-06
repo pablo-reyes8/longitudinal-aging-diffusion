@@ -10,10 +10,12 @@ from torch import nn
 
 from src.inference import (
     compute_face_aging_diagnostics,
+    diagnose_checkpoint_adaptive_age_sweep,
     diagnose_conditioning_sources,
     diagnose_checkpoint_age_sweep,
     diagnose_checkpoint_strength_sweep,
     infer_face_aging_direct,
+    evaluate_delta_bins,
 )
 from src.loss import AgeEstimatorAdapter, IdentityEncoderAdapter
 from src.training import (
@@ -148,6 +150,56 @@ def test_age_response_calibration_exact_linear_oracle_and_edge_cases():
         {"target_delta_age": 5, "predicted_delta_age": 1},
         {"target_delta_age": 5, "predicted_delta_age": 2},
     ]) is None
+
+
+def test_delta_bin_evaluation_reports_all_bins_and_direction_splits():
+    rows = [
+        {"target_delta_age": 0, "predicted_delta_age": 1, "age_error": 1, "identity_cosine": 0.9},
+        {"target_delta_age": 4, "predicted_delta_age": 3, "age_error": -1, "identity_cosine": 0.8},
+        {"target_delta_age": -4, "predicted_delta_age": -5, "age_error": -1, "identity_cosine": 0.6},
+        {"target_delta_age": 10, "predicted_delta_age": 8, "age_error": -2, "identity_cosine": 0.7},
+        {"target_delta_age": 20, "predicted_delta_age": 22, "age_error": 2, "identity_cosine": 0.5},
+        {"target_delta_age": -40, "predicted_delta_age": -30, "age_error": 10, "identity_cosine": 0.3},
+    ]
+    frame = evaluate_delta_bins(rows)
+    overall = frame[frame["direction"] == "all"].set_index("delta_bin")
+    assert overall.index.tolist() == ["zero", "short", "medium", "long", "very_long"]
+    assert overall.loc["short", "N"] == 2
+    assert overall.loc["short", "mean_absolute_age_error"] == pytest.approx(1.0)
+    assert overall.loc["short", "mean_requested_delta"] == pytest.approx(0.0)
+    assert overall.loc["short", "median_identity_cosine"] == pytest.approx(0.7)
+    assert overall.loc["short", "directional_accuracy"] == pytest.approx(1.0)
+    assert set(frame[frame["delta_bin"] == "short"]["direction"]) == {
+        "all", "forward", "reverse",
+    }
+    with pytest.raises(ValueError):
+        evaluate_delta_bins(rows, thresholds=[15, 5, 30])
+
+
+def test_checkpoint_adaptive_sweep_records_strength_and_delta_bins(tmp_path):
+    original = make_training_bundle(seed=889)
+    checkpoint = atomic_torch_save(
+        build_inference_payload(original, {"image_size": 32}),
+        tmp_path / "adapter.pt",
+    )
+    rebuilt = attach_diagnostics(make_training_bundle(seed=889))
+    frame = diagnose_checkpoint_adaptive_age_sweep(
+        checkpoint_path=checkpoint,
+        bundle=rebuilt,
+        source_image=Image.new("RGB", (38, 32), (110, 75, 55)),
+        source_age=30,
+        target_ages=[26, 30, 40, 65],
+        strength_map={5: 0.18, 15: 0.30, 999: 0.44},
+        output_dir=tmp_path / "adaptive",
+        num_inference_steps=2,
+        image_size=32,
+    )
+    assert frame["effective_strength"].tolist() == [0.18, 0.18, 0.30, 0.44]
+    assert frame["strength"].tolist() == frame["effective_strength"].tolist()
+    assert (tmp_path / "adaptive" / "adaptive_age_sweep.png").exists()
+    assert (tmp_path / "adaptive" / "adaptive_sampling_diagnostics.csv").exists()
+    assert (tmp_path / "adaptive" / "delta_bin_evaluation.csv").exists()
+    assert not list((tmp_path / "adaptive").glob("age_*.png"))
 
 
 def test_directional_age_metrics_exact_oracle_ignores_zero_delta():

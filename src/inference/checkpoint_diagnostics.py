@@ -10,7 +10,8 @@ import pandas as pd
 from PIL import Image, ImageDraw
 
 from .checkpoint_loading import load_face_aging_adapter_for_inference
-from .comparison_helpers import generate_strength_age_sweep
+from .comparison_helpers import generate_adaptive_age_sweep, generate_strength_age_sweep
+from .delta_bin_evaluation import save_delta_bin_evaluation
 from .infer_face_aging import infer_face_aging, save_inference_image
 from .inference_utils import prepare_inference_image, tensor_to_pil
 
@@ -22,6 +23,8 @@ DIAGNOSTIC_COLUMNS = [
     "num_inference_steps", "text_guidance_scale", "text_reference_mode",
     "age_guidance_scale", "image_guidance_scale", "seed",
 ]
+
+ADAPTIVE_DIAGNOSTIC_COLUMNS = [*DIAGNOSTIC_COLUMNS, "effective_strength"]
 
 STRENGTH_SUMMARY_COLUMNS = [
     "checkpoint", "strength", "age_calibration_intercept",
@@ -292,6 +295,104 @@ def diagnose_checkpoint_strength_sweep(
         frame.attrs.update({
             "grid_path": str(destination / "strength_age_sweeps.png"),
             "csv_path": str(csv_path),
+        })
+    return frame
+
+
+def diagnose_checkpoint_adaptive_age_sweep(
+    checkpoint_path: str | Path,
+    bundle,
+    source_image,
+    source_age: int,
+    target_ages: Iterable[int],
+    *,
+    strength_map=None,
+    delta_bin_thresholds: Sequence[float] | None = None,
+    output_dir: str | Path | None = None,
+    num_inference_steps: int = 50,
+    text_guidance_scale: float = 7.0,
+    text_reference_mode: str = "source_age",
+    age_guidance_scale: float = 3.0,
+    image_guidance_scale: float = 1.5,
+    negative_prompt: str = "",
+    prompt_style: str = "selfage",
+    use_cfg: bool = True,
+    seed: int = 2026,
+    image_size: int = 256,
+    strict_config: bool = True,
+) -> pd.DataFrame:
+    """Run one checkpoint strip with one adaptive strength per requested age."""
+    _require_auxiliaries(bundle)
+    checkpoint = Path(checkpoint_path).expanduser()
+    ages = [int(age) for age in target_ages]
+    if not ages:
+        raise ValueError("target_ages must not be empty")
+    load_face_aging_adapter_for_inference(bundle, checkpoint, strict_config=strict_config)
+    destination = Path(output_dir).expanduser() if output_dir is not None else None
+    sweep = generate_adaptive_age_sweep(
+        bundle=bundle,
+        image=source_image,
+        ages=ages,
+        strength_map=strength_map,
+        output_path=(destination / "adaptive_age_sweep.png") if destination else None,
+        annotate_diagnostics=True,
+        include_source=True,
+        source_age=source_age,
+        mode="direct",
+        num_inference_steps=num_inference_steps,
+        text_guidance_scale=text_guidance_scale,
+        text_reference_mode=text_reference_mode,
+        age_guidance_scale=age_guidance_scale,
+        image_guidance_scale=image_guidance_scale,
+        negative_prompt=negative_prompt,
+        prompt_style=prompt_style,
+        use_cfg=use_cfg,
+        seed=seed,
+        image_size=image_size,
+        compute_diagnostics=True,
+    )
+    rows = []
+    for age, result in zip(ages, sweep["results"]):
+        diagnostics = result.get("diagnostics")
+        if diagnostics is None:
+            raise RuntimeError("Auxiliary diagnostics unexpectedly returned None")
+        predicted = diagnostics["predicted_generated_age"]
+        effective_strength = float(result["effective_strength"])
+        rows.append({
+            "checkpoint": _checkpoint_label(checkpoint),
+            "source_age": source_age,
+            "target_age": float(age),
+            "target_delta_age": diagnostics["target_delta_age"],
+            "predicted_source_age": diagnostics["predicted_source_age"],
+            "predicted_generated_age": predicted,
+            "predicted_delta_age": diagnostics["predicted_delta_age"],
+            "age_error": predicted - float(age),
+            "delta_age_error": diagnostics["delta_age_error"],
+            "identity_cosine": diagnostics["identity_cosine_source_generated"],
+            "mode": result["mode"],
+            "strength": effective_strength,
+            "num_inference_steps": int(num_inference_steps),
+            "text_guidance_scale": float(text_guidance_scale),
+            "text_reference_mode": result["text_reference_mode"],
+            "age_guidance_scale": result["age_guidance_scale"],
+            "image_guidance_scale": float(image_guidance_scale),
+            "seed": int(seed),
+            "effective_strength": effective_strength,
+        })
+    frame = pd.DataFrame(rows, columns=ADAPTIVE_DIAGNOSTIC_COLUMNS)
+    if destination is not None:
+        destination.mkdir(parents=True, exist_ok=True)
+        csv_path = destination / "adaptive_sampling_diagnostics.csv"
+        frame.to_csv(csv_path, index=False)
+        delta_frame = save_delta_bin_evaluation(
+            rows,
+            destination / "delta_bin_evaluation.csv",
+            thresholds=delta_bin_thresholds,
+        )
+        frame.attrs.update({
+            "grid_path": str(destination / "adaptive_age_sweep.png"),
+            "csv_path": str(csv_path),
+            "delta_bin_csv_path": delta_frame.attrs["csv_path"],
         })
     return frame
 

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pandas as pd
 import pytest
 import torch
 from PIL import Image
@@ -119,6 +122,34 @@ def test_monitoring_age_list_writes_ordered_images_and_grid(tmp_path):
     assert (epoch_dir / "age_sweep.png").exists()
     assert [sample["target_age"] for sample in report["samples"]] == [30, 40, 50, 65]
     assert all((epoch_dir / f"age_{age:03d}.png").exists() for age in report["target_ages"])
+
+
+def test_training_monitor_can_use_adaptive_main_strip_and_keeps_fixed_sweep(tmp_path):
+    bundle = make_training_bundle(seed=712)
+    loss_fn = make_training_loss(bundle)
+    report = run_face_aging_monitor(
+        bundle=bundle,
+        loss_fn=loss_fn,
+        image=Image.new("RGB", (40, 32), (120, 80, 50)),
+        epoch=0,
+        output_dir=tmp_path,
+        target_age=[26, 30, 40, 65],
+        source_age=30,
+        use_adaptive_strength=True,
+        strength_map={5: 0.18, 15: 0.30, 999: 0.44},
+        strength_multi=[0.20, 0.40],
+        num_inference_steps=2,
+        image_size=32,
+    )
+    epoch_dir = tmp_path / "epoch_001"
+    assert report["adaptive_strength"] is True
+    assert [sample["effective_strength"] for sample in report["samples"]] == [
+        0.18, 0.18, 0.30, 0.44,
+    ]
+    assert Path(report["delta_bin_csv"]).exists()
+    assert (epoch_dir / "strength_age_sweeps.png").exists()
+    diagnostics = pd.read_csv(report["diagnostics_csv"])
+    assert diagnostics["effective_strength"].tolist() == [0.18, 0.18, 0.30, 0.44]
 
 
 @pytest.mark.parametrize("ages", [[], [30, 30], [30, 121], [30, "40"]])

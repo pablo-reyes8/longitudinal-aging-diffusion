@@ -6,7 +6,7 @@ import math
 from collections.abc import Iterable, Mapping
 
 
-TARGET_INTERCEPT = 0.0
+TARGET_INTERCEPT = -3.19
 TARGET_SLOPE = 0.84
 
 REAL_IDENTITY_MEAN = 0.532

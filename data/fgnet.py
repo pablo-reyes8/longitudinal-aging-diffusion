@@ -10,6 +10,8 @@ from pathlib import Path
 import re
 from typing import Sequence
 
+from PIL import Image, UnidentifiedImageError
+
 from .indexing import ImageRecord, PairRecord, build_pair_index
 
 
@@ -57,12 +59,16 @@ def build_fgnet_manifest(
     *,
     min_age: int | None = None,
     max_age: int | None = None,
+    min_native_side: int | None = None,
 ) -> tuple[Path, list[ImageRecord], dict]:
     """Scan a flat FG-NET image folder and return project-compatible records."""
+    if min_native_side is not None and min_native_side <= 0:
+        raise ValueError("min_native_side must be positive when provided")
     root = _resolve_images_root(root_dir)
     rows: list[ImageRecord] = []
     skipped = []
     filtered = []
+    filtered_resolution = []
     for path in sorted((item for item in root.iterdir() if item.is_file()), key=lambda p: p.name.lower()):
         parsed = parse_fgnet_filename(path.name)
         if parsed is None:
@@ -72,6 +78,25 @@ def build_fgnet_manifest(
         if (min_age is not None and age < min_age) or (max_age is not None and age > max_age):
             filtered.append({"filename": path.name, "age": age})
             continue
+        if min_native_side is not None:
+            try:
+                with Image.open(path) as image:
+                    width, height = image.size
+            except (OSError, ValueError, UnidentifiedImageError) as exc:
+                skipped.append({
+                    "filename": path.name,
+                    "reason": "unreadable_image",
+                    "error": str(exc),
+                })
+                continue
+            if width < min_native_side or height < min_native_side:
+                filtered_resolution.append({
+                    "filename": path.name,
+                    "width": int(width),
+                    "height": int(height),
+                    "required_min_side": int(min_native_side),
+                })
+                continue
         rows.append(ImageRecord(
             person_id=person_id,
             relative_path=path.name,
@@ -83,13 +108,21 @@ def build_fgnet_manifest(
         ))
     rows.sort(key=lambda row: (row.person_id, row.age, row.same_age_index, row.filename.lower()))
     if not rows:
-        raise ValueError(f"No valid FG-NET images found in {root}")
+        resolution_note = (
+            f" meeting the native {min_native_side}x{min_native_side} minimum"
+            if min_native_side is not None
+            else ""
+        )
+        raise ValueError(f"No valid FG-NET images{resolution_note} found in {root}")
     return root, rows, {
         "root_dir": str(root),
         "images": len(rows),
         "identities": len({row.person_id for row in rows}),
         "skipped_files": skipped,
         "filtered_ages": filtered,
+        "native_resolution_min_side": min_native_side,
+        "filtered_low_resolution": filtered_resolution,
+        "filtered_low_resolution_count": len(filtered_resolution),
     }
 
 

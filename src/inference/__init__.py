@@ -11,14 +11,22 @@ from .checkpoint_loading import (
     load_face_aging_inference_bundle,
 )
 from .checkpoint_diagnostics import (
+    diagnose_checkpoint_adaptive_age_sweep,
     diagnose_checkpoint_age_sweep,
     diagnose_checkpoint_strength_sweep,
     diagnose_checkpoints_age_sweep,
 )
 from .comparison_helpers import (
     compare_inference_modes,
+    generate_adaptive_age_sweep,
     generate_age_sweep,
     generate_strength_age_sweep,
+)
+from .delta_bin_evaluation import (
+    DEFAULT_DELTA_BIN_THRESHOLDS,
+    DELTA_BIN_COLUMNS,
+    evaluate_delta_bins,
+    save_delta_bin_evaluation,
 )
 from .conditioning_isolation import (
     CONDITIONING_DIAGNOSTIC_COLUMNS,
@@ -33,10 +41,13 @@ from .ddim_inversion import (
 )
 from .diagnostics import compute_face_aging_diagnostics
 from .infer_face_aging import (
+    DEFAULT_STRENGTH_MAP,
+    generate_aged_face_adaptive_strength,
     infer_face_aging,
     infer_face_aging_direct,
     infer_face_aging_inverse,
     resolve_inference_strength,
+    resolve_adaptive_strength,
     save_inference_image,
 )
 from .inference_utils import (

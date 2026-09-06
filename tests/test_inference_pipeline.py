@@ -5,14 +5,18 @@ import torch
 from PIL import Image
 
 from src.inference import (
+    DEFAULT_STRENGTH_MAP,
     compare_inference_modes,
     encode_image_to_latent,
     generate_age_sweep,
+    generate_adaptive_age_sweep,
+    generate_aged_face_adaptive_strength,
     infer_face_aging,
     infer_face_aging_direct,
     infer_face_aging_inverse,
     prepare_inference_image,
     resolve_inference_strength,
+    resolve_adaptive_strength,
 )
 from training_fakes import make_training_bundle
 
@@ -122,6 +126,59 @@ def test_delta_dependent_strength_reports_effective_value_and_disabled_is_exact(
     assert torch.equal(baseline["latents"], disabled["latents"])
     assert adaptive["requested_strength"] == 0.5
     assert adaptive["strength"] == adaptive["metadata"]["effective_strength"] == 0.355
+
+
+def test_threshold_adaptive_strength_policy_boundaries_symmetry_and_validation():
+    assert DEFAULT_STRENGTH_MAP[3] == 0.18
+    custom = {40: 0.42, 5: 0.18, 20: 0.30, 10: 0.22, 30: 0.36}
+    expected = {
+        0: 0.18, 5: 0.18, 6: 0.22, 10: 0.22, 11: 0.30,
+        20: 0.30, 21: 0.36, 30: 0.36, 31: 0.42, 100: 0.42,
+    }
+    for delta, strength in expected.items():
+        assert resolve_adaptive_strength(
+            source_age=30, target_age=30 + delta, strength_map=custom
+        ) == strength
+        assert resolve_adaptive_strength(
+            source_age=30, target_age=30 - delta, strength_map=custom
+        ) == strength
+    for invalid in ({}, {-1: 0.2}, {5: 0.0}, {5: 1.1}, {5: float("nan")}):
+        with pytest.raises(ValueError):
+            resolve_adaptive_strength(source_age=30, target_age=40, strength_map=invalid)
+
+
+def test_adaptive_inference_records_effective_strength_without_changing_fixed_api():
+    bundle = make_training_bundle(seed=446)
+    common = inference_kwargs(bundle, source_age=30, target_age=34, num_inference_steps=3)
+    adaptive = generate_aged_face_adaptive_strength(
+        **common, strength_map={5: 0.20, 20: 0.35}
+    )
+    explicit = infer_face_aging_direct(**{**common, "strength": 0.20})
+    assert adaptive["effective_strength"] == 0.20
+    assert adaptive["metadata"]["adaptive_strength"] is True
+    assert adaptive["metadata"]["strength_map"] == {5: 0.20, 20: 0.35}
+    assert torch.equal(adaptive["image_tensor"], explicit["image_tensor"])
+    with pytest.raises(ValueError, match="direct"):
+        generate_aged_face_adaptive_strength(**common, use_inverse_diffusion=True)
+
+
+def test_adaptive_age_sweep_generates_exactly_one_strength_per_target(tmp_path):
+    bundle = make_training_bundle(seed=447)
+    sweep = generate_adaptive_age_sweep(
+        bundle=bundle,
+        image=source_image(),
+        ages=[30, 35, 50, 70],
+        source_age=30,
+        strength_map={5: 0.18, 20: 0.30, 40: 0.42},
+        num_inference_steps=2,
+        image_size=32,
+        output_path=tmp_path / "adaptive.png",
+    )
+    assert [result["effective_strength"] for result in sweep["results"]] == [
+        0.18, 0.18, 0.30, 0.42,
+    ]
+    assert len(sweep["results"]) == 4
+    assert (tmp_path / "adaptive.png").exists()
 
 
 def test_internal_batch_size_two_alignment_and_finite_outputs():

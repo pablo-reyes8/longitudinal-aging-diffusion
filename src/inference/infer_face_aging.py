@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+import math
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,58 @@ from .inference_utils import (
     tensor_to_pil,
 )
 from .prompt_building import build_inference_prompt_pack
+
+
+DEFAULT_STRENGTH_MAP = {
+    3: 0.18,
+    8: 0.24,
+    15: 0.30,
+    25: 0.36,
+    30: 0.40,
+    999: 0.44,
+}
+
+
+def resolve_adaptive_strength(
+    *,
+    source_age: float,
+    target_age: float,
+    strength_map: Mapping[float, float] | None = None,
+) -> float:
+    """Resolve a piecewise strength from ``abs(target_age - source_age)``."""
+    policy = DEFAULT_STRENGTH_MAP if strength_map is None else strength_map
+    if not isinstance(policy, Mapping) or not policy:
+        raise ValueError("strength_map must be a non-empty threshold-to-strength mapping")
+    if isinstance(source_age, bool) or isinstance(target_age, bool):
+        raise ValueError("source_age and target_age must be finite numbers")
+    try:
+        source_value, target_value = float(source_age), float(target_age)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("source_age and target_age must be finite numbers") from exc
+    if not math.isfinite(source_value) or not math.isfinite(target_value):
+        raise ValueError("source_age and target_age must be finite numbers")
+
+    normalized = []
+    for raw_threshold, raw_strength in policy.items():
+        if isinstance(raw_threshold, bool) or isinstance(raw_strength, bool):
+            raise ValueError("strength_map thresholds and strengths must be numeric")
+        try:
+            threshold = float(raw_threshold)
+            value = float(raw_strength)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("strength_map thresholds and strengths must be numeric") from exc
+        if not math.isfinite(threshold) or threshold < 0:
+            raise ValueError("strength_map thresholds must be finite and non-negative")
+        if not math.isfinite(value) or not 0 < value <= 1:
+            raise ValueError("strength_map values must be finite and in (0, 1]")
+        normalized.append((threshold, value))
+    normalized.sort(key=lambda item: item[0])
+
+    absolute_delta = abs(target_value - source_value)
+    for threshold, value in normalized:
+        if absolute_delta <= threshold:
+            return value
+    return normalized[-1][1]
 
 
 def _scale_model_input(scheduler, latents, timestep):
@@ -426,6 +480,43 @@ def infer_face_aging_inverse(**kwargs):
     kwargs.pop("mode", None)
     kwargs.pop("use_inverse_diffusion", None)
     return infer_face_aging(mode="inverse", **kwargs)
+
+
+def generate_aged_face_adaptive_strength(
+    *,
+    strength_map: Mapping[float, float] | None = None,
+    **kwargs,
+):
+    """Run direct img2img inference with an explicit delta-threshold policy."""
+    source_age = kwargs.get("source_age")
+    target_age = kwargs.get("target_age")
+    if source_age is None or target_age is None:
+        raise ValueError("adaptive strength requires both source_age and target_age")
+    use_inverse = kwargs.get("use_inverse_diffusion")
+    mode = kwargs.get("mode", "direct")
+    if use_inverse is True or (use_inverse is None and mode == "inverse"):
+        raise ValueError("adaptive strength is only available for direct img2img inference")
+    effective_strength = resolve_adaptive_strength(
+        source_age=source_age,
+        target_age=target_age,
+        strength_map=strength_map,
+    )
+    call_kwargs = dict(kwargs)
+    call_kwargs["strength"] = effective_strength
+    call_kwargs["use_delta_dependent_strength"] = False
+    result = infer_face_aging(**call_kwargs)
+    if isinstance(result, dict):
+        result["effective_strength"] = effective_strength
+        result["metadata"]["effective_strength"] = effective_strength
+        result["metadata"]["adaptive_strength"] = True
+        result["metadata"]["strength_map"] = dict(
+            DEFAULT_STRENGTH_MAP if strength_map is None else strength_map
+        )
+    elif isinstance(result, Image.Image):
+        result.info["effective_strength"] = effective_strength
+    elif isinstance(result, torch.Tensor):
+        result.effective_strength = effective_strength
+    return result
 
 
 def save_inference_image(result: dict[str, Any], output_path: str | Path) -> Path:

@@ -24,6 +24,9 @@ from .indexing import (
 from .validation import summarize_pipeline
 
 
+_FGNET_NATIVE_RESOLUTION_FILTER_THRESHOLD = 400
+
+
 def _seed_worker(worker_id: int) -> None:
     worker_seed = torch.initial_seed() % 2**32
     random.seed(worker_seed)
@@ -130,8 +133,20 @@ def build_face_aging_dataloaders(
             seed=seed + split_index,
         )
         if split == "train" and include_kaggle:
+            # At high-resolution training sizes, never upscale undersized FG-NET
+            # inputs. Filtering before pair construction lets the scarcity-aware
+            # selector refill the requested budget from the closest useful valid
+            # transition cells whenever enough alternatives exist.
+            fgnet_min_native_side = (
+                image_size
+                if image_size >= _FGNET_NATIVE_RESOLUTION_FILTER_THRESHOLD
+                else None
+            )
             fgnet_root, fgnet_manifest, fgnet_audit = build_fgnet_manifest(
-                kaggle_path, min_age=min_age, max_age=max_age
+                kaggle_path,
+                min_age=min_age,
+                max_age=max_age,
+                min_native_side=fgnet_min_native_side,
             )
             fgnet_all_pairs = FaceAgingDataset(
                 fgnet_root,
@@ -245,6 +260,7 @@ def build_face_aging_dataloaders(
         " Pair sources | "
         f"Colombian canonical={primary_canonical_pairs:,}, epoch_observations={primary_observations:,} | "
         f"FG-NET available={kaggle_metadata['available_pairs']:,}, selected={complementary_observations:,}, "
+        f"low_res_filtered={kaggle_metadata.get('filtered_low_resolution_count', 0):,}, "
         f"reverse_prob={kaggle_metadata.get('reverse_pair_prob', 0.0):.2f} | "
         f"combined_epoch_observations={len(train_dataset):,}"
     )

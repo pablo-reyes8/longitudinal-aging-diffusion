@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from PIL import Image
 
 from data import (
     PairRecord,
@@ -114,6 +115,64 @@ def test_kaggle_proportion_one_uses_all_combinations(tiny_root: Path, tiny_fgnet
     assert metadata["kaggle"]["available_pairs"] == 8
     assert metadata["kaggle"]["selected_pairs"] == 8
     assert loaders["train"].dataset.complementary_observations == 8
+
+
+def test_high_resolution_loader_filters_small_fgnet_images_and_refills_budget(
+    tiny_root: Path,
+    tmp_path: Path,
+):
+    fgnet_root = tmp_path / "fgnet_high_resolution"
+    fgnet_root.mkdir()
+    specifications = {
+        # This image would participate in a useful 2 -> 43 transition, but its
+        # short side cannot support a native 400 px crop.
+        "001A02.JPG": (307, 361),
+        "001A43.JPG": (420, 420),
+        # Six valid alternatives leave enough candidates to preserve the
+        # requested complementary-pair budget.
+        "002A03.JPG": (410, 430),
+        "002A10.JPG": (400, 400),
+        "002A38.JPG": (450, 410),
+        "003A04.JPG": (430, 420),
+        "003A12.JPG": (440, 440),
+        "003A40.JPG": (401, 460),
+    }
+    for filename, size in specifications.items():
+        Image.new("RGB", size, (80, 100, 120)).save(fgnet_root / filename)
+
+    baseline, _ = build_face_aging_dataloaders(
+        tiny_root,
+        image_size=400,
+        batch_size=4,
+        num_workers=0,
+        train_shuffle=False,
+        train_drop_last=False,
+    )
+    requested_pairs = round(len(baseline["train"].dataset) * 0.40)
+    loaders, metadata = build_face_aging_dataloaders(
+        tiny_root,
+        image_size=400,
+        batch_size=4,
+        num_workers=0,
+        train_shuffle=False,
+        train_drop_last=False,
+        include_kaggle=True,
+        kaggle_path=fgnet_root,
+        kaggle_proportion=0.40,
+    )
+
+    kaggle = metadata["kaggle"]
+    complementary = loaders["train"].dataset.complementary
+    assert kaggle["native_resolution_min_side"] == 400
+    assert kaggle["filtered_low_resolution_count"] == 1
+    assert kaggle["filtered_low_resolution"][0]["filename"] == "001A02.JPG"
+    assert kaggle["selected_pairs"] == requested_pairs
+    assert len(complementary) == requested_pairs
+    assert all(pair.source_path != "001A02.JPG" for pair in complementary.all_pairs)
+    assert all(pair.target_path != "001A02.JPG" for pair in complementary.all_pairs)
+    for row in complementary.manifest:
+        with Image.open(fgnet_root / row.relative_path) as image:
+            assert min(image.size) >= 400
 
 
 def test_fgnet_uses_higher_reverse_probability_and_common_preprocessing(tiny_root: Path, tiny_fgnet_root: Path):

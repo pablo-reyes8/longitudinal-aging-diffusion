@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 
 import torch
 
+from src.inference import evaluate_delta_bins, resolve_adaptive_strength
 from src.model import build_face_aging_optimizer, get_bundle_trainable_named_parameters
 
 from .checkpoints import (
@@ -192,6 +193,9 @@ def train_model(
     monitoring_num_inference_steps: int = 30,
     monitoring_strength: float = 0.35,
     monitoring_strength_multi: Sequence[float] | None = (0.20, 0.27, 0.35, 0.40),
+    monitoring_use_adaptive_strength: bool = False,
+    monitoring_strength_map: Mapping[float, float] | None = None,
+    monitoring_delta_bin_thresholds: Sequence[float] | None = None,
     monitoring_use_delta_dependent_strength: bool = False,
     monitoring_base_strength: float = 0.18,
     monitoring_strength_per_year: float = 0.005,
@@ -279,10 +283,24 @@ def train_model(
         or not 0 < monitoring_min_strength <= monitoring_max_strength <= 1
     ):
         raise ValueError("invalid delta-dependent monitoring strength policy")
+    if monitoring_use_adaptive_strength and monitoring_use_delta_dependent_strength:
+        raise ValueError(
+            "Choose either monitoring_use_adaptive_strength or "
+            "monitoring_use_delta_dependent_strength, not both"
+        )
     resolved_monitoring_mode = (
         ("inverse" if monitoring_use_inverse_diffusion else "direct")
         if monitoring_use_inverse_diffusion is not None else monitoring_mode
     )
+    if monitoring_use_adaptive_strength:
+        if resolved_monitoring_mode != "direct":
+            raise ValueError("monitoring_use_adaptive_strength requires direct inference")
+        resolve_adaptive_strength(
+            source_age=0,
+            target_age=0,
+            strength_map=monitoring_strength_map,
+        )
+    evaluate_delta_bins([], thresholds=monitoring_delta_bin_thresholds)
     set_seed(seed, deterministic=deterministic)
     precision = setup_device_and_precision(device, amp_enabled=amp_enabled, amp_dtype=amp_dtype, scaler=scaler)
     resolved_device = precision["device"]
@@ -455,6 +473,14 @@ def train_model(
             list(resolved_monitoring_strengths)
             if resolved_monitoring_strengths is not None else None
         ),
+        "monitoring_use_adaptive_strength": bool(monitoring_use_adaptive_strength),
+        "monitoring_strength_map": (
+            dict(monitoring_strength_map) if monitoring_strength_map is not None else None
+        ),
+        "monitoring_delta_bin_thresholds": (
+            list(monitoring_delta_bin_thresholds)
+            if monitoring_delta_bin_thresholds is not None else None
+        ),
         "monitoring_use_delta_dependent_strength": bool(
             monitoring_use_delta_dependent_strength
         ),
@@ -488,6 +514,7 @@ def train_model(
         f"strength={monitoring_strength}, ages={monitoring_ages}, seed={monitoring_seed}, "
         f"text_ref={monitoring_text_reference_mode}, age_cfg={monitoring_age_guidance_scale}, "
         f"strength_sweep={list(resolved_monitoring_strengths) if resolved_monitoring_strengths is not None else 'off'}, "
+        f"adaptive_strength={monitoring_use_adaptive_strength}, "
         f"delta_strength={monitoring_use_delta_dependent_strength}"
         if monitoring_image is not None else "disabled"
     )
@@ -713,6 +740,9 @@ def train_model(
                     num_inference_steps=monitoring_num_inference_steps,
                     strength=monitoring_strength,
                     strength_multi=resolved_monitoring_strengths,
+                    use_adaptive_strength=monitoring_use_adaptive_strength,
+                    strength_map=monitoring_strength_map,
+                    delta_bin_thresholds=monitoring_delta_bin_thresholds,
                     use_delta_dependent_strength=monitoring_use_delta_dependent_strength,
                     base_strength=monitoring_base_strength,
                     strength_per_year=monitoring_strength_per_year,
