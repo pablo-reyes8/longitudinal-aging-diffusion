@@ -145,6 +145,20 @@ def test_threshold_adaptive_strength_policy_boundaries_symmetry_and_validation()
     for invalid in ({}, {-1: 0.2}, {5: 0.0}, {5: 1.1}, {5: float("nan")}):
         with pytest.raises(ValueError):
             resolve_adaptive_strength(source_age=30, target_age=40, strength_map=invalid)
+    exact = {8: 0.45, 12: 0.40, 26: 0.05, 65: 0.45}
+    assert resolve_adaptive_strength(
+        source_age=64,
+        target_age=65,
+        strength_map={3: 0.01},
+        target_age_strength_map=exact,
+    ) == 0.45
+    assert resolve_adaptive_strength(
+        source_age=10, target_age=26, target_age_strength_map=exact
+    ) == 0.05
+    with pytest.raises(ValueError, match="absent"):
+        resolve_adaptive_strength(
+            source_age=30, target_age=35, target_age_strength_map=exact
+        )
 
 
 def test_adaptive_inference_records_effective_strength_without_changing_fixed_api():
@@ -156,10 +170,19 @@ def test_adaptive_inference_records_effective_strength_without_changing_fixed_ap
     explicit = infer_face_aging_direct(**{**common, "strength": 0.20})
     assert adaptive["effective_strength"] == 0.20
     assert adaptive["metadata"]["adaptive_strength"] is True
+    assert adaptive["metadata"]["adaptive_strength_policy"] == "absolute_delta"
     assert adaptive["metadata"]["strength_map"] == {5: 0.20, 20: 0.35}
     assert torch.equal(adaptive["image_tensor"], explicit["image_tensor"])
     with pytest.raises(ValueError, match="direct"):
         generate_aged_face_adaptive_strength(**common, use_inverse_diffusion=True)
+
+    exact = generate_aged_face_adaptive_strength(
+        **common,
+        strength_map={999: 0.9},
+        target_age_strength_map={34: 0.12},
+    )
+    assert exact["effective_strength"] == 0.12
+    assert exact["metadata"]["adaptive_strength_policy"] == "target_age_exact"
 
 
 def test_adaptive_age_sweep_generates_exactly_one_strength_per_target(tmp_path):

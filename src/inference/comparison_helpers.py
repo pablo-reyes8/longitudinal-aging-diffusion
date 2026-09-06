@@ -113,7 +113,7 @@ def generate_age_sweep(
 
 def generate_adaptive_age_sweep(
     *, bundle, image, ages: Iterable[int], output_path: str | Path | None = None,
-    strength_map=None, annotate_diagnostics: bool = False,
+    strength_map=None, target_age_strength_map=None, annotate_diagnostics: bool = False,
     include_source: bool = False, **kwargs,
 ):
     """Render one age strip using one threshold-resolved strength per target."""
@@ -128,6 +128,7 @@ def generate_adaptive_age_sweep(
             image=image,
             target_age=age,
             strength_map=strength_map,
+            target_age_strength_map=target_age_strength_map,
             **kwargs,
         )
         for age in ordered_ages
@@ -180,6 +181,8 @@ def generate_adaptive_age_sweep(
         "strength_map": dict(
             results[0]["metadata"]["strength_map"]
         ),
+        "target_age_strength_map": results[0]["metadata"]["target_age_strength_map"],
+        "adaptive_strength_policy": results[0]["metadata"]["adaptive_strength_policy"],
     }
 
 

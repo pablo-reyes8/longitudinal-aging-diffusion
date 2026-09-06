@@ -195,6 +195,7 @@ def train_model(
     monitoring_strength_multi: Sequence[float] | None = (0.20, 0.27, 0.35, 0.40),
     monitoring_use_adaptive_strength: bool = False,
     monitoring_strength_map: Mapping[float, float] | None = None,
+    monitoring_target_age_strength_map: Mapping[float, float] | None = None,
     monitoring_delta_bin_thresholds: Sequence[float] | None = None,
     monitoring_use_delta_dependent_strength: bool = False,
     monitoring_base_strength: float = 0.18,
@@ -295,10 +296,22 @@ def train_model(
     if monitoring_use_adaptive_strength:
         if resolved_monitoring_mode != "direct":
             raise ValueError("monitoring_use_adaptive_strength requires direct inference")
-        resolve_adaptive_strength(
-            source_age=0,
-            target_age=0,
-            strength_map=monitoring_strength_map,
+        if monitoring_target_age_strength_map is not None and monitoring_ages is None:
+            raise ValueError(
+                "monitoring_target_age_strength_map requires monitoring_target_age"
+            )
+        ages_to_validate = monitoring_ages or [0]
+        for monitoring_age in ages_to_validate:
+            resolve_adaptive_strength(
+                source_age=monitoring_source_age or 0,
+                target_age=monitoring_age,
+                strength_map=monitoring_strength_map,
+                target_age_strength_map=monitoring_target_age_strength_map,
+            )
+    elif monitoring_target_age_strength_map is not None:
+        raise ValueError(
+            "monitoring_target_age_strength_map requires "
+            "monitoring_use_adaptive_strength=True"
         )
     evaluate_delta_bins([], thresholds=monitoring_delta_bin_thresholds)
     set_seed(seed, deterministic=deterministic)
@@ -477,6 +490,10 @@ def train_model(
         "monitoring_strength_map": (
             dict(monitoring_strength_map) if monitoring_strength_map is not None else None
         ),
+        "monitoring_target_age_strength_map": (
+            dict(monitoring_target_age_strength_map)
+            if monitoring_target_age_strength_map is not None else None
+        ),
         "monitoring_delta_bin_thresholds": (
             list(monitoring_delta_bin_thresholds)
             if monitoring_delta_bin_thresholds is not None else None
@@ -509,12 +526,19 @@ def train_model(
     )
     identity_count_text = training_identity_count if training_identity_count is not None else "unknown"
     checkpoint_text = str(root) if root is not None else "disabled"
+    adaptive_policy_text = "off"
+    if monitoring_use_adaptive_strength:
+        adaptive_policy_text = (
+            "target_age_exact"
+            if monitoring_target_age_strength_map is not None
+            else "absolute_delta"
+        )
     monitoring_text = (
         f"every {sample_every_epochs} epoch(s), mode={resolved_monitoring_mode}, "
         f"strength={monitoring_strength}, ages={monitoring_ages}, seed={monitoring_seed}, "
         f"text_ref={monitoring_text_reference_mode}, age_cfg={monitoring_age_guidance_scale}, "
         f"strength_sweep={list(resolved_monitoring_strengths) if resolved_monitoring_strengths is not None else 'off'}, "
-        f"adaptive_strength={monitoring_use_adaptive_strength}, "
+        f"adaptive_strength={adaptive_policy_text}, "
         f"delta_strength={monitoring_use_delta_dependent_strength}"
         if monitoring_image is not None else "disabled"
     )
@@ -742,6 +766,7 @@ def train_model(
                     strength_multi=resolved_monitoring_strengths,
                     use_adaptive_strength=monitoring_use_adaptive_strength,
                     strength_map=monitoring_strength_map,
+                    target_age_strength_map=monitoring_target_age_strength_map,
                     delta_bin_thresholds=monitoring_delta_bin_thresholds,
                     use_delta_dependent_strength=monitoring_use_delta_dependent_strength,
                     base_strength=monitoring_base_strength,

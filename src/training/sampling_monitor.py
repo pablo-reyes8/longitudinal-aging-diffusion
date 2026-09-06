@@ -111,6 +111,7 @@ def run_face_aging_monitor(
     strength=0.35, text_guidance_scale=7.0, image_guidance_scale=1.5,
     strength_multi: Sequence[float] | None = (0.20, 0.27, 0.35, 0.40),
     use_adaptive_strength: bool = False, strength_map=None,
+    target_age_strength_map=None,
     delta_bin_thresholds: Sequence[float] | None = None,
     use_delta_dependent_strength: bool = False,
     base_strength: float = 0.18, strength_per_year: float = 0.005,
@@ -150,6 +151,7 @@ def run_face_aging_monitor(
         sweep_fn = generate_adaptive_age_sweep if use_adaptive_strength else generate_age_sweep
         sweep_kwargs = {
             "strength_map": strength_map,
+            "target_age_strength_map": target_age_strength_map,
         } if use_adaptive_strength else {
             "strength": strength,
             "use_delta_dependent_strength": use_delta_dependent_strength,
@@ -322,6 +324,8 @@ def run_face_aging_monitor(
             "directional_calibration": directional_calibration,
             "adaptive_strength": bool(use_adaptive_strength),
             "strength_map": sweep.get("strength_map"),
+            "target_age_strength_map": sweep.get("target_age_strength_map"),
+            "adaptive_strength_policy": sweep.get("adaptive_strength_policy"),
             "delta_bin_evaluation": (
                 delta_bin_report.to_dict(orient="records")
                 if delta_bin_report is not None else None
@@ -337,7 +341,10 @@ def run_face_aging_monitor(
         generate_aged_face_adaptive_strength if use_adaptive_strength else infer_face_aging
     )
     inference_kwargs = (
-        {"strength_map": strength_map}
+        {
+            "strength_map": strength_map,
+            "target_age_strength_map": target_age_strength_map,
+        }
         if use_adaptive_strength else {
             "strength": strength,
             "use_delta_dependent_strength": use_delta_dependent_strength,

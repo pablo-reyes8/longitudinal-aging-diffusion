@@ -48,11 +48,9 @@ def resolve_adaptive_strength(
     source_age: float,
     target_age: float,
     strength_map: Mapping[float, float] | None = None,
+    target_age_strength_map: Mapping[float, float] | None = None,
 ) -> float:
-    """Resolve a piecewise strength from ``abs(target_age - source_age)``."""
-    policy = DEFAULT_STRENGTH_MAP if strength_map is None else strength_map
-    if not isinstance(policy, Mapping) or not policy:
-        raise ValueError("strength_map must be a non-empty threshold-to-strength mapping")
+    """Resolve exact-target strength first, otherwise use absolute-delta thresholds."""
     if isinstance(source_age, bool) or isinstance(target_age, bool):
         raise ValueError("source_age and target_age must be finite numbers")
     try:
@@ -62,6 +60,37 @@ def resolve_adaptive_strength(
     if not math.isfinite(source_value) or not math.isfinite(target_value):
         raise ValueError("source_age and target_age must be finite numbers")
 
+    if target_age_strength_map is not None:
+        if not isinstance(target_age_strength_map, Mapping) or not target_age_strength_map:
+            raise ValueError("target_age_strength_map must be a non-empty age-to-strength mapping")
+        normalized_exact = {}
+        for raw_age, raw_strength in target_age_strength_map.items():
+            if isinstance(raw_age, bool) or isinstance(raw_strength, bool):
+                raise ValueError("target_age_strength_map ages and strengths must be numeric")
+            try:
+                exact_age, exact_strength = float(raw_age), float(raw_strength)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "target_age_strength_map ages and strengths must be numeric"
+                ) from exc
+            if not math.isfinite(exact_age):
+                raise ValueError("target_age_strength_map ages must be finite")
+            if not math.isfinite(exact_strength) or not 0 < exact_strength <= 1:
+                raise ValueError(
+                    "target_age_strength_map values must be finite and in (0, 1]"
+                )
+            normalized_exact[exact_age] = exact_strength
+        if target_value not in normalized_exact:
+            available = ", ".join(f"{age:g}" for age in sorted(normalized_exact))
+            raise ValueError(
+                f"target age {target_value:g} is absent from target_age_strength_map; "
+                f"available ages: [{available}]"
+            )
+        return normalized_exact[target_value]
+
+    policy = DEFAULT_STRENGTH_MAP if strength_map is None else strength_map
+    if not isinstance(policy, Mapping) or not policy:
+        raise ValueError("strength_map must be a non-empty threshold-to-strength mapping")
     normalized = []
     for raw_threshold, raw_strength in policy.items():
         if isinstance(raw_threshold, bool) or isinstance(raw_strength, bool):
@@ -485,6 +514,7 @@ def infer_face_aging_inverse(**kwargs):
 def generate_aged_face_adaptive_strength(
     *,
     strength_map: Mapping[float, float] | None = None,
+    target_age_strength_map: Mapping[float, float] | None = None,
     **kwargs,
 ):
     """Run direct img2img inference with an explicit delta-threshold policy."""
@@ -500,6 +530,7 @@ def generate_aged_face_adaptive_strength(
         source_age=source_age,
         target_age=target_age,
         strength_map=strength_map,
+        target_age_strength_map=target_age_strength_map,
     )
     call_kwargs = dict(kwargs)
     call_kwargs["strength"] = effective_strength
@@ -509,8 +540,15 @@ def generate_aged_face_adaptive_strength(
         result["effective_strength"] = effective_strength
         result["metadata"]["effective_strength"] = effective_strength
         result["metadata"]["adaptive_strength"] = True
+        result["metadata"]["adaptive_strength_policy"] = (
+            "target_age_exact" if target_age_strength_map is not None else "absolute_delta"
+        )
         result["metadata"]["strength_map"] = dict(
             DEFAULT_STRENGTH_MAP if strength_map is None else strength_map
+        )
+        result["metadata"]["target_age_strength_map"] = (
+            dict(target_age_strength_map)
+            if target_age_strength_map is not None else None
         )
     elif isinstance(result, Image.Image):
         result.info["effective_strength"] = effective_strength

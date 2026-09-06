@@ -136,7 +136,8 @@ def test_training_monitor_can_use_adaptive_main_strip_and_keeps_fixed_sweep(tmp_
         target_age=[26, 30, 40, 65],
         source_age=30,
         use_adaptive_strength=True,
-        strength_map={5: 0.18, 15: 0.30, 999: 0.44},
+        strength_map={999: 0.99},  # ignored because exact target policy has priority
+        target_age_strength_map={26: 0.05, 30: 0.08, 40: 0.25, 65: 0.45},
         strength_multi=[0.20, 0.40],
         num_inference_steps=2,
         image_size=32,
@@ -144,12 +145,13 @@ def test_training_monitor_can_use_adaptive_main_strip_and_keeps_fixed_sweep(tmp_
     epoch_dir = tmp_path / "epoch_001"
     assert report["adaptive_strength"] is True
     assert [sample["effective_strength"] for sample in report["samples"]] == [
-        0.18, 0.18, 0.30, 0.44,
+        0.05, 0.08, 0.25, 0.45,
     ]
+    assert report["adaptive_strength_policy"] == "target_age_exact"
     assert Path(report["delta_bin_csv"]).exists()
     assert (epoch_dir / "strength_age_sweeps.png").exists()
     diagnostics = pd.read_csv(report["diagnostics_csv"])
-    assert diagnostics["effective_strength"].tolist() == [0.18, 0.18, 0.30, 0.44]
+    assert diagnostics["effective_strength"].tolist() == [0.05, 0.08, 0.25, 0.45]
 
 
 @pytest.mark.parametrize("ages", [[], [30, 30], [30, 121], [30, "40"]])
