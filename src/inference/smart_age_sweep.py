@@ -12,6 +12,8 @@ from PIL import Image, ImageDraw
 from .checkpoint_loading import load_face_aging_adapter_for_inference
 from .infer_face_aging import infer_face_aging
 from .inference_utils import prepare_inference_image, tensor_to_pil
+from .prompt_assistance import resolve_prompt_assistance, stack_sweep_variants
+from .prompt_building import build_inference_prompt_pack
 
 
 DEFAULT_SMART_TARGET_STRENGTH_MAP = {
@@ -212,8 +214,13 @@ def diagnose_checkpoint_smart_age_sweep(
     seed: int = 2026,
     image_size: int = 256,
     strict_config: bool = True,
+    generate_assisted_prompt_variant: bool = False,
+    prompt_assistance_config=None,
+    source_mouth_state: str = "auto",
+    source_expression_state: str = "auto",
+    save_prompt_comparison: bool = True,
 ) -> pd.DataFrame:
-    """Screen a short strength trajectory per age and save only selected outputs."""
+    """Search base candidates, then optionally compare one assisted winner per age."""
     if bundle.get("identity_encoder") is None or bundle.get("age_estimator") is None:
         raise ValueError("Smart sweep requires ArcFace and MiVOLO in the inference bundle")
     ages = [int(age) for age in target_ages]
@@ -425,18 +432,166 @@ def diagnose_checkpoint_smart_age_sweep(
     else:
         candidate_grid_path = None
 
+    assisted_candidates = []
+    assisted_rows = []
+    prompt_records = []
+    if generate_assisted_prompt_variant:
+        for selected in selected_candidates:
+            base_row = selected["row"]
+            target_age = int(base_row["target_age"])
+            base_target_prompt = selected["result"].get("target_prompt")
+            if not base_target_prompt:
+                base_target_prompt = build_inference_prompt_pack(
+                    target_age=target_age,
+                    source_age=source_age,
+                    source_prompt=source_prompt,
+                    prompt_style=prompt_style,
+                    negative_prompt=negative_prompt,
+                )["target_prompt"]
+            assistance = resolve_prompt_assistance(
+                base_target_prompt=base_target_prompt,
+                base_negative_prompt=negative_prompt,
+                prompt_assistance_config=prompt_assistance_config,
+                source_mouth_state=source_mouth_state,
+                source_expression_state=source_expression_state,
+            )
+            result = infer_face_aging(
+                bundle=bundle,
+                image=source_image,
+                source_age=source_age,
+                target_age=target_age,
+                source_prompt=source_prompt,
+                target_prompt=assistance["target_prompt"],
+                mode="direct",
+                strength=float(base_row["strength"]),
+                num_inference_steps=num_inference_steps,
+                text_reference_mode=text_reference_mode,
+                age_guidance_scale=float(base_row["age_guidance_scale"]),
+                text_guidance_scale=float(base_row["text_guidance_scale"]),
+                image_guidance_scale=float(base_row["image_guidance_scale"]),
+                negative_prompt=assistance["negative_prompt"],
+                prompt_style=prompt_style,
+                use_cfg=use_cfg,
+                seed=seed,
+                image_size=image_size,
+                compute_diagnostics=True,
+            )
+            diagnostics = result.get("diagnostics")
+            if diagnostics is None:
+                raise RuntimeError("Prompt-assisted smart sweep did not receive diagnostics")
+            predicted_age = float(diagnostics["predicted_generated_age"])
+            age_error = predicted_age - float(base_row["expected_mivolo_target_age"])
+            absolute_error = abs(age_error)
+            row = {
+                **base_row,
+                "trial_idx": 1,
+                "pred_source_age": float(diagnostics["predicted_source_age"]),
+                "pred_age": predicted_age,
+                "age_error": age_error,
+                "abs_age_error": absolute_error,
+                "outside_confidence_error": max(
+                    0.0, absolute_error - float(base_row["confidence_margin_years"])
+                ),
+                "identity_cosine": float(
+                    diagnostics["identity_cosine_source_generated"]
+                ),
+                "selected_best": True,
+                "image_path": None,
+            }
+            assisted = {
+                "row": row,
+                "result": result,
+                "base_guidance": selected["base_guidance"],
+            }
+            assisted_candidates.append(assisted)
+            assisted_rows.append(row)
+            prompt_records.append({"target_age": target_age, **assistance})
+            print(
+                " Prompt comparison | "
+                f"target={target_age:3d} | strength={row['strength']:.3f} | "
+                f"base pred={base_row['pred_age']:.2f} ID={base_row['identity_cosine']:.3f} | "
+                f"assisted pred={row['pred_age']:.2f} ID={row['identity_cosine']:.3f}"
+            )
+        for warning in dict.fromkeys(
+            warning for record in prompt_records for warning in record["warnings"]
+        ):
+            print(f"  Note: {warning}")
+        if prompt_records:
+            print("  Positive support: " + ", ".join(prompt_records[0]["positive_terms"]))
+            print("  Negative prompt: " + prompt_records[0]["negative_prompt"])
+
     final_grid = _final_grid(source_image, source_age, selected_candidates, image_size)
-    final_grid_path = destination / "smart_age_sweep.png"
+    final_grid_path = destination / (
+        "smart_age_sweep_base.png"
+        if generate_assisted_prompt_variant else "smart_age_sweep.png"
+    )
     final_grid.save(final_grid_path, format="PNG", optimize=False)
     trials_frame = pd.DataFrame(trial_rows, columns=SMART_TRIAL_COLUMNS)
-    trials_path = destination / "smart_sweep_trials.csv"
+    trials_path = destination / (
+        "smart_sweep_trials_base.csv"
+        if generate_assisted_prompt_variant else "smart_sweep_trials.csv"
+    )
     trials_frame.to_csv(trials_path, index=False)
     summary_rows = []
     for candidate, candidates in zip(selected_candidates, all_candidates):
         summary_rows.append({**candidate["row"], "trials_run": len(candidates)})
     summary_frame = pd.DataFrame(summary_rows)
-    summary_path = destination / "smart_sweep_summary.csv"
+    summary_path = destination / (
+        "smart_sweep_summary_base.csv"
+        if generate_assisted_prompt_variant else "smart_sweep_summary.csv"
+    )
     summary_frame.to_csv(summary_path, index=False)
+    assisted_frame = None
+    assisted_grid_path = None
+    assisted_trials_path = None
+    assisted_summary_path = None
+    comparison_grid_path = None
+    if assisted_candidates:
+        assisted_grid = _final_grid(
+            source_image, source_age, assisted_candidates, image_size
+        )
+        assisted_grid_path = destination / "smart_age_sweep_assisted.png"
+        assisted_grid.save(assisted_grid_path, format="PNG", optimize=False)
+        assisted_frame = pd.DataFrame([
+            {**candidate["row"], "trials_run": 1}
+            for candidate in assisted_candidates
+        ])
+        assisted_frame["support_prompt_used"] = [
+            ", ".join(record["positive_terms"]) for record in prompt_records
+        ]
+        assisted_frame["negative_prompt_used"] = [
+            record["negative_prompt"] for record in prompt_records
+        ]
+        assisted_frame["source_mouth_state"] = [
+            record["source_mouth_state"] for record in prompt_records
+        ]
+        assisted_frame["source_expression_state"] = [
+            record["source_expression_state"] for record in prompt_records
+        ]
+        assisted_trials_path = destination / "smart_sweep_trials_assisted.csv"
+        assisted_trials_frame = pd.DataFrame(
+            assisted_rows, columns=SMART_TRIAL_COLUMNS
+        )
+        assisted_trials_frame["support_prompt_used"] = assisted_frame[
+            "support_prompt_used"
+        ]
+        assisted_trials_frame["negative_prompt_used"] = assisted_frame[
+            "negative_prompt_used"
+        ]
+        assisted_trials_frame["source_mouth_state"] = assisted_frame[
+            "source_mouth_state"
+        ]
+        assisted_trials_frame["source_expression_state"] = assisted_frame[
+            "source_expression_state"
+        ]
+        assisted_trials_frame.to_csv(assisted_trials_path, index=False)
+        assisted_summary_path = destination / "smart_sweep_summary_assisted.csv"
+        assisted_frame.to_csv(assisted_summary_path, index=False)
+        if save_prompt_comparison:
+            comparison_grid_path = destination / "smart_age_sweep_comparison.png"
+            stack_sweep_variants(final_grid, assisted_grid).save(
+                comparison_grid_path, format="PNG", optimize=False
+            )
     summary_frame.attrs.update({
         "grid_path": str(final_grid_path),
         "trials_csv_path": str(trials_path),
@@ -448,4 +603,21 @@ def diagnose_checkpoint_smart_age_sweep(
         "mivolo_bias_alpha": float(mivolo_bias_alpha),
         "mivolo_bias_beta": float(mivolo_bias_beta),
     })
+    if generate_assisted_prompt_variant:
+        summary_frame.attrs.update({
+            "assisted": assisted_frame,
+            "assisted_grid_path": (
+                str(assisted_grid_path) if assisted_grid_path else None
+            ),
+            "assisted_trials_csv_path": (
+                str(assisted_trials_path) if assisted_trials_path else None
+            ),
+            "assisted_summary_csv_path": (
+                str(assisted_summary_path) if assisted_summary_path else None
+            ),
+            "comparison_grid_path": (
+                str(comparison_grid_path) if comparison_grid_path else None
+            ),
+            "prompt_assistance": prompt_records,
+        })
     return summary_frame

@@ -58,6 +58,11 @@ from .inference_utils import (
     tensor_to_pil,
 )
 from .prompt_building import build_inference_prompt_pack, extract_prompt_age
+from .prompt_assistance import (
+    DEFAULT_PROMPT_ASSISTANCE_CONFIG,
+    resolve_prompt_assistance,
+    stack_sweep_variants,
+)
 from .smart_age_sweep import (
     DEFAULT_SMART_TARGET_STRENGTH_MAP,
     SMART_TRIAL_COLUMNS,

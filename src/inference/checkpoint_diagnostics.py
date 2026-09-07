@@ -14,6 +14,7 @@ from .comparison_helpers import generate_adaptive_age_sweep, generate_strength_a
 from .delta_bin_evaluation import save_delta_bin_evaluation
 from .infer_face_aging import infer_face_aging, save_inference_image
 from .inference_utils import prepare_inference_image, tensor_to_pil
+from .prompt_assistance import resolve_prompt_assistance, stack_sweep_variants
 
 
 DIAGNOSTIC_COLUMNS = [
@@ -321,8 +322,13 @@ def diagnose_checkpoint_adaptive_age_sweep(
     seed: int = 2026,
     image_size: int = 256,
     strict_config: bool = True,
+    generate_assisted_prompt_variant: bool = False,
+    prompt_assistance_config=None,
+    source_mouth_state: str = "auto",
+    source_expression_state: str = "auto",
+    save_prompt_comparison: bool = True,
 ) -> pd.DataFrame:
-    """Run one checkpoint strip with one adaptive strength per requested age."""
+    """Run an adaptive sweep and optionally compare a prompt-assisted variant."""
     _require_auxiliaries(bundle)
     checkpoint = Path(checkpoint_path).expanduser()
     ages = [int(age) for age in target_ages]
@@ -330,13 +336,17 @@ def diagnose_checkpoint_adaptive_age_sweep(
         raise ValueError("target_ages must not be empty")
     load_face_aging_adapter_for_inference(bundle, checkpoint, strict_config=strict_config)
     destination = Path(output_dir).expanduser() if output_dir is not None else None
+    base_grid_name = (
+        "adaptive_age_sweep_base.png"
+        if generate_assisted_prompt_variant else "adaptive_age_sweep.png"
+    )
     sweep = generate_adaptive_age_sweep(
         bundle=bundle,
         image=source_image,
         ages=ages,
         strength_map=strength_map,
         target_age_strength_map=target_age_strength_map,
-        output_path=(destination / "adaptive_age_sweep.png") if destination else None,
+        output_path=(destination / base_grid_name) if destination else None,
         annotate_diagnostics=True,
         include_source=True,
         source_age=source_age,
@@ -382,19 +392,158 @@ def diagnose_checkpoint_adaptive_age_sweep(
             "effective_strength": effective_strength,
         })
     frame = pd.DataFrame(rows, columns=ADAPTIVE_DIAGNOSTIC_COLUMNS)
+    assisted_frame = None
+    assisted_sweep = None
+    prompt_records = []
+    comparison_grid_path = None
+    if generate_assisted_prompt_variant:
+        assisted_results = []
+        for age, base_result in zip(ages, sweep["results"]):
+            assistance = resolve_prompt_assistance(
+                base_target_prompt=base_result["target_prompt"],
+                base_negative_prompt=negative_prompt,
+                prompt_assistance_config=prompt_assistance_config,
+                source_mouth_state=source_mouth_state,
+                source_expression_state=source_expression_state,
+            )
+            result = infer_face_aging(
+                bundle=bundle,
+                image=source_image,
+                target_age=age,
+                source_age=source_age,
+                target_prompt=assistance["target_prompt"],
+                mode="direct",
+                strength=float(base_result["effective_strength"]),
+                num_inference_steps=num_inference_steps,
+                text_guidance_scale=text_guidance_scale,
+                text_reference_mode=text_reference_mode,
+                age_guidance_scale=age_guidance_scale,
+                image_guidance_scale=image_guidance_scale,
+                negative_prompt=assistance["negative_prompt"],
+                prompt_style=prompt_style,
+                use_cfg=use_cfg,
+                seed=seed,
+                image_size=image_size,
+                compute_diagnostics=True,
+            )
+            result["effective_strength"] = float(base_result["effective_strength"])
+            assisted_results.append(result)
+            prompt_records.append({"target_age": age, **assistance})
+        assisted_sweep = {"results": assisted_results}
+        assisted_rows = []
+        for age, result in zip(ages, assisted_results):
+            diagnostics = result.get("diagnostics")
+            if diagnostics is None:
+                raise RuntimeError("Prompt-assisted sweep did not receive diagnostics")
+            effective_strength = float(result["effective_strength"])
+            predicted = diagnostics["predicted_generated_age"]
+            assisted_rows.append({
+                "checkpoint": _checkpoint_label(checkpoint),
+                "source_age": source_age,
+                "target_age": float(age),
+                "target_delta_age": diagnostics["target_delta_age"],
+                "predicted_source_age": diagnostics["predicted_source_age"],
+                "predicted_generated_age": predicted,
+                "predicted_delta_age": diagnostics["predicted_delta_age"],
+                "age_error": predicted - float(age),
+                "delta_age_error": diagnostics["delta_age_error"],
+                "identity_cosine": diagnostics["identity_cosine_source_generated"],
+                "mode": result["mode"],
+                "strength": effective_strength,
+                "num_inference_steps": int(num_inference_steps),
+                "text_guidance_scale": float(text_guidance_scale),
+                "text_reference_mode": result["text_reference_mode"],
+                "age_guidance_scale": result["age_guidance_scale"],
+                "image_guidance_scale": float(image_guidance_scale),
+                "seed": int(seed),
+                "effective_strength": effective_strength,
+            })
+        assisted_frame = pd.DataFrame(
+            assisted_rows, columns=ADAPTIVE_DIAGNOSTIC_COLUMNS
+        )
+        assisted_frame["support_prompt_used"] = [
+            ", ".join(record["positive_terms"]) for record in prompt_records
+        ]
+        assisted_frame["negative_prompt_used"] = [
+            record["negative_prompt"] for record in prompt_records
+        ]
+        assisted_frame["source_mouth_state"] = [
+            record["source_mouth_state"] for record in prompt_records
+        ]
+        assisted_frame["source_expression_state"] = [
+            record["source_expression_state"] for record in prompt_records
+        ]
+        print("\n Prompt assistance | adaptive sweep")
+        for base_row, assisted_row in zip(rows, assisted_rows):
+            print(
+                f"  target={int(base_row['target_age']):3d} | "
+                f"strength={base_row['effective_strength']:.3f} | "
+                f"base pred={base_row['predicted_generated_age']:.2f} "
+                f"ID={base_row['identity_cosine']:.3f} | "
+                f"assisted pred={assisted_row['predicted_generated_age']:.2f} "
+                f"ID={assisted_row['identity_cosine']:.3f}"
+            )
+        if prompt_records:
+            print("  Positive support: " + ", ".join(prompt_records[0]["positive_terms"]))
+            print("  Negative prompt: " + prompt_records[0]["negative_prompt"])
+        for warning in dict.fromkeys(
+            warning for record in prompt_records for warning in record["warnings"]
+        ):
+            print(f"  Note: {warning}")
     if destination is not None:
         destination.mkdir(parents=True, exist_ok=True)
-        csv_path = destination / "adaptive_sampling_diagnostics.csv"
+        csv_path = destination / (
+            "adaptive_sweep_summary_base.csv"
+            if generate_assisted_prompt_variant else "adaptive_sampling_diagnostics.csv"
+        )
         frame.to_csv(csv_path, index=False)
         delta_frame = save_delta_bin_evaluation(
             rows,
-            destination / "delta_bin_evaluation.csv",
+            destination / (
+                "delta_bin_evaluation_base.csv"
+                if generate_assisted_prompt_variant else "delta_bin_evaluation.csv"
+            ),
             thresholds=delta_bin_thresholds,
         )
         frame.attrs.update({
-            "grid_path": str(destination / "adaptive_age_sweep.png"),
+            "grid_path": str(destination / base_grid_name),
             "csv_path": str(csv_path),
             "delta_bin_csv_path": delta_frame.attrs["csv_path"],
+        })
+        if assisted_frame is not None:
+            assisted_grid_path = destination / "adaptive_age_sweep_assisted.png"
+            _save_annotated_grid(
+                source_image=source_image,
+                source_age=source_age,
+                results=assisted_sweep["results"],
+                image_size=image_size,
+                output_path=assisted_grid_path,
+            )
+            assisted_csv_path = destination / "adaptive_sweep_summary_assisted.csv"
+            assisted_frame.to_csv(assisted_csv_path, index=False)
+            assisted_delta = save_delta_bin_evaluation(
+                assisted_frame.to_dict("records"),
+                destination / "delta_bin_evaluation_assisted.csv",
+                thresholds=delta_bin_thresholds,
+            )
+            if save_prompt_comparison:
+                comparison_grid_path = destination / "adaptive_age_sweep_comparison.png"
+                stack_sweep_variants(
+                    sweep["grid"],
+                    Image.open(assisted_grid_path).convert("RGB"),
+                ).save(comparison_grid_path, format="PNG", optimize=False)
+            frame.attrs.update({
+                "assisted_grid_path": str(assisted_grid_path),
+                "assisted_csv_path": str(assisted_csv_path),
+                "assisted_delta_bin_csv_path": assisted_delta.attrs["csv_path"],
+                "comparison_grid_path": (
+                    str(comparison_grid_path) if comparison_grid_path else None
+                ),
+            })
+    if generate_assisted_prompt_variant:
+        frame.attrs.update({
+            "assisted": assisted_frame,
+            "prompt_assistance": prompt_records,
         })
     return frame
 

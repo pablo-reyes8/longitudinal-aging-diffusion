@@ -202,6 +202,47 @@ def test_checkpoint_adaptive_sweep_records_strength_and_delta_bins(tmp_path):
     assert not list((tmp_path / "adaptive").glob("age_*.png"))
 
 
+def test_checkpoint_adaptive_sweep_can_save_base_and_assisted_variants(tmp_path):
+    original = make_training_bundle(seed=890)
+    checkpoint = atomic_torch_save(
+        build_inference_payload(original, {"image_size": 32}),
+        tmp_path / "adapter.pt",
+    )
+    rebuilt = attach_diagnostics(make_training_bundle(seed=890))
+    frame = diagnose_checkpoint_adaptive_age_sweep(
+        checkpoint_path=checkpoint,
+        bundle=rebuilt,
+        source_image=Image.new("RGB", (38, 32), (110, 75, 55)),
+        source_age=30,
+        target_ages=[30, 40],
+        strength_map={15: 0.18, 999: 0.30},
+        output_dir=tmp_path / "adaptive_assisted",
+        num_inference_steps=1,
+        image_size=32,
+        generate_assisted_prompt_variant=True,
+        source_mouth_state="visible_teeth",
+        prompt_assistance_config={
+            "positive_global_terms": ["custom realistic face"],
+            "negative_global_terms": ["custom artifact"],
+        },
+    )
+    assisted = frame.attrs["assisted"]
+    assert len(assisted) == len(frame) == 2
+    assert assisted["effective_strength"].tolist() == frame["effective_strength"].tolist()
+    assert assisted["support_prompt_used"].str.contains("custom realistic face").all()
+    assert assisted["negative_prompt_used"].str.contains("custom artifact").all()
+    for name in (
+        "adaptive_age_sweep_base.png",
+        "adaptive_age_sweep_assisted.png",
+        "adaptive_age_sweep_comparison.png",
+        "adaptive_sweep_summary_base.csv",
+        "adaptive_sweep_summary_assisted.csv",
+        "delta_bin_evaluation_base.csv",
+        "delta_bin_evaluation_assisted.csv",
+    ):
+        assert (tmp_path / "adaptive_assisted" / name).exists()
+
+
 def test_directional_age_metrics_exact_oracle_ignores_zero_delta():
     metrics = compute_directional_age_metrics([
         {"target_delta_age": 10, "predicted_delta_age": 8},

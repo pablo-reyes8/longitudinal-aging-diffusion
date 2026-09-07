@@ -130,3 +130,55 @@ def test_smart_sweep_nearest_prior_unbiased_mode_and_micro_search_are_reproducib
     assert first_trials.loc[4, "text_guidance_scale"] == 7.25
     assert Path(first.attrs["all_trials_grid_path"]).exists()
     assert len(list((tmp_path / "first" / "smart_trials").glob("*.png"))) == 5
+
+
+def test_assisted_smart_sweep_reuses_base_winners_without_repeating_search(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        "src.inference.smart_age_sweep.load_face_aging_adapter_for_inference",
+        lambda *args, **kwargs: {},
+    )
+    calls = []
+
+    def recording_inference(**kwargs):
+        calls.append(kwargs)
+        return _fake_inference(**kwargs)
+
+    monkeypatch.setattr(
+        "src.inference.smart_age_sweep.infer_face_aging", recording_inference
+    )
+    frame = diagnose_checkpoint_smart_age_sweep(
+        checkpoint_path=tmp_path / "adapter.pt",
+        bundle=_bundle(),
+        source_image=Image.new("RGB", (24, 24), "gray"),
+        source_age=26,
+        target_ages=[26, 65],
+        output_dir=tmp_path / "assisted",
+        target_age_strength_map={26: 0.04, 65: 0.25},
+        generate_assisted_prompt_variant=True,
+        source_mouth_state="closed",
+        image_size=24,
+    )
+
+    assisted_calls = [call for call in calls if call.get("target_prompt")]
+    base_calls = [call for call in calls if not call.get("target_prompt")]
+    assert len(base_calls) == 6  # one zero-delta pass + five search trials
+    assert len(assisted_calls) == 2  # exactly one pass for each selected winner
+    assert [call["strength"] for call in assisted_calls] == pytest.approx(
+        frame["strength"].tolist()
+    )
+    assert all("keep lips closed" in call["target_prompt"] for call in assisted_calls)
+    assert all("open mouth" in call["negative_prompt"] for call in assisted_calls)
+    assert frame.attrs["assisted"]["trials_run"].tolist() == [1, 1]
+    for attr in (
+        "grid_path",
+        "assisted_grid_path",
+        "comparison_grid_path",
+        "trials_csv_path",
+        "assisted_trials_csv_path",
+        "summary_csv_path",
+        "assisted_summary_csv_path",
+    ):
+        assert Path(frame.attrs[attr]).exists()
