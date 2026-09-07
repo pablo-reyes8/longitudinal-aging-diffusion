@@ -32,10 +32,13 @@ DEFAULT_SMART_TARGET_STRENGTH_MAP = {
 
 SMART_TRIAL_COLUMNS = [
     "source_age", "target_age", "requested_delta_age", "trial_idx",
+    "direction_policy", "selection_target_age", "acceptable_age_min",
+    "acceptable_age_max",
     "base_strength", "strength", "age_guidance_scale", "text_guidance_scale",
     "image_guidance_scale", "pred_source_age", "expected_mivolo_delta",
     "expected_mivolo_target_age", "pred_age", "age_error", "abs_age_error",
-    "confidence_margin_years", "outside_confidence_error", "identity_cosine",
+    "confidence_margin_years", "outside_confidence_error", "within_confidence_band",
+    "identity_cosine",
     "selected_best", "image_path",
 ]
 
@@ -141,7 +144,9 @@ def _final_grid(source_image, source_age: int, selected: list[dict], image_size:
         labels.append(
             f"Target {row['target_age']:.0f} | Pred {row['pred_age']:.1f}\n"
             f"Err {row['age_error']:+.1f} | Strength {row['strength']:.3f}\n"
-            f"ID {row['identity_cosine']:.3f} | band +/-{row['confidence_margin_years']:.1f}"
+            f"ID {row['identity_cosine']:.3f} | "
+            f"band [{row['acceptable_age_min']:.1f}, {row['acceptable_age_max']:.1f}] | "
+            f"{'OK' if row['within_confidence_band'] else 'MISS'}"
         )
     images.insert(source_position, source)
     labels.insert(source_position, f"Original\nAge {source_age}")
@@ -157,9 +162,24 @@ def _final_grid(source_image, source_age: int, selected: list[dict], image_size:
 
 
 def _select_best(candidates: list[dict], *, identity_tiebreak: bool, age_margin: float) -> dict:
-    minimum = min(candidate["row"]["outside_confidence_error"] for candidate in candidates)
-    eligible = [
-        candidate for candidate in candidates
+    pool = candidates
+    if candidates[0]["row"]["direction_policy"] == "aging_at_or_above_target":
+        at_or_above = [
+            candidate for candidate in candidates
+            if candidate["row"]["pred_age"] >= candidate["row"]["acceptable_age_min"]
+        ]
+        # Undershooting can win only if the model never reached the requested age.
+        if at_or_above:
+            pool = at_or_above
+    minimum = min(candidate["row"]["outside_confidence_error"] for candidate in pool)
+    in_band = [
+        candidate for candidate in pool
+        if math.isclose(
+            candidate["row"]["outside_confidence_error"], 0.0, abs_tol=1e-12
+        )
+    ]
+    eligible = in_band or [
+        candidate for candidate in pool
         if candidate["row"]["outside_confidence_error"] <= minimum + age_margin
     ]
     if identity_tiebreak:
@@ -180,6 +200,62 @@ def _select_best(candidates: list[dict], *, identity_tiebreak: bool, age_margin:
     )
 
 
+def _directional_selection_policy(
+    *,
+    requested_delta: float,
+    target_age: float,
+    predicted_source_age: float,
+    expected_mivolo_target_age: float,
+    confidence_aging: float,
+    confidence_rejuvenecer: float,
+) -> dict[str, float | str]:
+    if requested_delta > 0:
+        return {
+            "direction_policy": "aging_at_or_above_target",
+            "selection_target_age": float(target_age),
+            "acceptable_age_min": float(target_age),
+            "acceptable_age_max": float(target_age) + float(confidence_aging),
+            "confidence_margin_years": float(confidence_aging),
+        }
+    if requested_delta < 0:
+        center = float(expected_mivolo_target_age)
+        return {
+            "direction_policy": "rejuvenation_mivolo_centered",
+            "selection_target_age": center,
+            "acceptable_age_min": center - float(confidence_rejuvenecer),
+            "acceptable_age_max": center + float(confidence_rejuvenecer),
+            "confidence_margin_years": float(confidence_rejuvenecer),
+        }
+    return {
+        "direction_policy": "zero_delta_exact_source",
+        "selection_target_age": float(predicted_source_age),
+        "acceptable_age_min": float(predicted_source_age),
+        "acceptable_age_max": float(predicted_source_age),
+        "confidence_margin_years": 0.0,
+    }
+
+
+def _distance_to_acceptable_band(
+    predicted_age: float, minimum_age: float, maximum_age: float
+) -> float:
+    if predicted_age < minimum_age:
+        return float(minimum_age - predicted_age)
+    if predicted_age > maximum_age:
+        return float(predicted_age - maximum_age)
+    return 0.0
+
+
+def _strength_search_direction(
+    *, requested_delta: float, predicted_age: float,
+    minimum_age: float, maximum_age: float,
+) -> float:
+    if requested_delta > 0:
+        return 1.0 if predicted_age < minimum_age else -1.0
+    if requested_delta < 0:
+        return 1.0 if predicted_age > maximum_age else -1.0
+    return -1.0
+
+
 def diagnose_checkpoint_smart_age_sweep(
     checkpoint_path: str | Path,
     bundle,
@@ -193,9 +269,8 @@ def diagnose_checkpoint_smart_age_sweep(
     use_bias_corrected_mivolo_target: bool = True,
     mivolo_bias_alpha: float = -3.19,
     mivolo_bias_beta: float = 0.841,
-    mivolo_small_delta_confidence_years: float = 4.0,
-    mivolo_large_delta_confidence_years: float = 2.0,
-    mivolo_full_confidence_delta: float = 25.0,
+    confidence_aging: float = 3.0,
+    confidence_rejuvenecer: float = 2.0,
     enable_guidance_micro_search: bool = False,
     age_guidance_scale: float = 3.0,
     text_guidance_scale: float = 7.0,
@@ -205,7 +280,6 @@ def diagnose_checkpoint_smart_age_sweep(
     strength_step_coarse: float = 0.05,
     strength_step_medium: float = 0.03,
     strength_step_fine: float = 0.02,
-    age_tolerance_years: float = 2.0,
     identity_tiebreak: bool = True,
     identity_margin_for_tiebreak: float = 1.0,
     save_all_trials: bool = False,
@@ -226,7 +300,13 @@ def diagnose_checkpoint_smart_age_sweep(
     source_expression_state: str = "auto",
     save_prompt_comparison: bool = True,
 ) -> pd.DataFrame:
-    """Search base candidates, then optionally compare one assisted winner per age."""
+    """Search candidates with asymmetric aging and calibrated rejuvenation bands.
+
+    Aging accepts only predictions from ``target_age`` through
+    ``target_age + confidence_aging``. Rejuvenation uses a symmetric
+    ``confidence_rejuvenecer`` band around the optional MiVOLO-calibrated target.
+    Zero delta is scored against the MiVOLO prediction of the unchanged source.
+    """
     if bundle.get("identity_encoder") is None or bundle.get("age_estimator") is None:
         raise ValueError("Smart sweep requires ArcFace and MiVOLO in the inference bundle")
     ages = [int(age) for age in target_ages]
@@ -241,7 +321,7 @@ def diagnose_checkpoint_smart_age_sweep(
         mivolo_bias_alpha, mivolo_bias_beta, age_guidance_scale,
         text_guidance_scale, image_guidance_scale, min_strength, max_strength,
         strength_step_coarse, strength_step_medium, strength_step_fine,
-        age_tolerance_years, identity_margin_for_tiebreak,
+        confidence_aging, confidence_rejuvenecer, identity_margin_for_tiebreak,
     )
     if not all(math.isfinite(float(value)) for value in scalar_values):
         raise ValueError("smart-sweep scalar parameters must be finite")
@@ -249,8 +329,10 @@ def diagnose_checkpoint_smart_age_sweep(
         raise ValueError("strength bounds must satisfy 0 < min_strength <= max_strength <= 1")
     if any(step <= 0 for step in (strength_step_coarse, strength_step_medium, strength_step_fine)):
         raise ValueError("strength search steps must be positive")
-    if age_tolerance_years < 0 or identity_margin_for_tiebreak < 0:
-        raise ValueError("age tolerance and identity tie-break margin must be non-negative")
+    if confidence_aging < 0 or confidence_rejuvenecer < 0:
+        raise ValueError("confidence_aging and confidence_rejuvenecer must be non-negative")
+    if identity_margin_for_tiebreak < 0:
+        raise ValueError("identity tie-break margin must be non-negative")
     prompt_assistance_scale = validate_prompt_assistance_scale(
         prompt_assistance_scale, "prompt_assistance_scale"
     )
@@ -258,14 +340,6 @@ def diagnose_checkpoint_smart_age_sweep(
         negative_prompt_assistance_scale, "negative_prompt_assistance_scale"
     )
     _validate_strength_map(target_age_strength_map)
-    # Validate the adaptive confidence policy once before loading/generating.
-    adaptive_mivolo_confidence_margin(
-        0,
-        small_delta_margin_years=mivolo_small_delta_confidence_years,
-        large_delta_margin_years=mivolo_large_delta_confidence_years,
-        full_confidence_delta=mivolo_full_confidence_delta,
-    )
-
     checkpoint = Path(checkpoint_path).expanduser()
     destination = Path(output_dir).expanduser()
     destination.mkdir(parents=True, exist_ok=True)
@@ -277,16 +351,6 @@ def diagnose_checkpoint_smart_age_sweep(
     trial_rows = []
     for target_age in ages:
         requested_delta = float(target_age - source_age)
-        absolute_delta = abs(requested_delta)
-        confidence_margin = max(
-            float(age_tolerance_years),
-            adaptive_mivolo_confidence_margin(
-                absolute_delta,
-                small_delta_margin_years=mivolo_small_delta_confidence_years,
-                large_delta_margin_years=mivolo_large_delta_confidence_years,
-                full_confidence_delta=mivolo_full_confidence_delta,
-            ),
-        )
         base_strength = (
             0.04 if requested_delta == 0
             else _clip(
@@ -334,14 +398,28 @@ def diagnose_checkpoint_smart_age_sweep(
                 global_pred_source_age + expected_delta
                 if use_bias_corrected_mivolo_target else float(target_age)
             )
+            policy = _directional_selection_policy(
+                requested_delta=requested_delta,
+                target_age=float(target_age),
+                predicted_source_age=global_pred_source_age,
+                expected_mivolo_target_age=expected_target,
+                confidence_aging=float(confidence_aging),
+                confidence_rejuvenecer=float(confidence_rejuvenecer),
+            )
             predicted_age = float(diagnostics["predicted_generated_age"])
-            age_error = predicted_age - expected_target
+            age_error = predicted_age - float(policy["selection_target_age"])
             absolute_error = abs(age_error)
+            outside_error = _distance_to_acceptable_band(
+                predicted_age,
+                float(policy["acceptable_age_min"]),
+                float(policy["acceptable_age_max"]),
+            )
             row = {
                 "source_age": float(source_age),
                 "target_age": float(target_age),
                 "requested_delta_age": requested_delta,
                 "trial_idx": trial_idx,
+                **policy,
                 "base_strength": base_strength,
                 "strength": current_strength,
                 "age_guidance_scale": float(current_age_guidance),
@@ -353,8 +431,8 @@ def diagnose_checkpoint_smart_age_sweep(
                 "pred_age": predicted_age,
                 "age_error": age_error,
                 "abs_age_error": absolute_error,
-                "confidence_margin_years": confidence_margin,
-                "outside_confidence_error": max(0.0, absolute_error - confidence_margin),
+                "outside_confidence_error": outside_error,
+                "within_confidence_band": outside_error == 0.0,
                 "identity_cosine": float(diagnostics["identity_cosine_source_generated"]),
                 "selected_best": False,
                 "image_path": None,
@@ -372,9 +450,14 @@ def diagnose_checkpoint_smart_age_sweep(
             trial_rows.append(row)
             tested_strengths.add(round(current_strength, 8))
 
-            if requested_delta == 0 or absolute_error <= confidence_margin:
+            if outside_error == 0.0:
                 break
-            direction = -1.0 if age_error > 0 else 1.0
+            direction = _strength_search_direction(
+                requested_delta=requested_delta,
+                predicted_age=predicted_age,
+                minimum_age=float(policy["acceptable_age_min"]),
+                maximum_age=float(policy["acceptable_age_max"]),
+            )
             if enable_guidance_micro_search and trial_idx >= 3:
                 if trial_idx == 3:
                     next_guidance = (
@@ -422,8 +505,10 @@ def diagnose_checkpoint_smart_age_sweep(
             f"target={target_age:3d} | trials={len(candidates)} | "
             f"strength={selected['row']['strength']:.3f} | "
             f"pred={selected['row']['pred_age']:.2f} | "
-            f"expected={selected['row']['expected_mivolo_target_age']:.2f} +/- "
-            f"{selected['row']['confidence_margin_years']:.2f} | "
+            f"policy={selected['row']['direction_policy']} | "
+            f"band=[{selected['row']['acceptable_age_min']:.2f}, "
+            f"{selected['row']['acceptable_age_max']:.2f}] | "
+            f"status={'OK' if selected['row']['within_confidence_band'] else 'MISS'} | "
             f"ID={selected['row']['identity_cosine']:.3f}"
         )
 
@@ -496,7 +581,7 @@ def diagnose_checkpoint_smart_age_sweep(
             if diagnostics is None:
                 raise RuntimeError("Prompt-assisted smart sweep did not receive diagnostics")
             predicted_age = float(diagnostics["predicted_generated_age"])
-            age_error = predicted_age - float(base_row["expected_mivolo_target_age"])
+            age_error = predicted_age - float(base_row["selection_target_age"])
             absolute_error = abs(age_error)
             row = {
                 **base_row,
@@ -505,8 +590,10 @@ def diagnose_checkpoint_smart_age_sweep(
                 "pred_age": predicted_age,
                 "age_error": age_error,
                 "abs_age_error": absolute_error,
-                "outside_confidence_error": max(
-                    0.0, absolute_error - float(base_row["confidence_margin_years"])
+                "outside_confidence_error": _distance_to_acceptable_band(
+                    predicted_age,
+                    float(base_row["acceptable_age_min"]),
+                    float(base_row["acceptable_age_max"]),
                 ),
                 "identity_cosine": float(
                     diagnostics["identity_cosine_source_generated"]
@@ -514,6 +601,7 @@ def diagnose_checkpoint_smart_age_sweep(
                 "selected_best": True,
                 "image_path": None,
             }
+            row["within_confidence_band"] = row["outside_confidence_error"] == 0.0
             assisted = {
                 "row": row,
                 "result": result,
@@ -632,6 +720,8 @@ def diagnose_checkpoint_smart_age_sweep(
         "bias_corrected": bool(use_bias_corrected_mivolo_target),
         "mivolo_bias_alpha": float(mivolo_bias_alpha),
         "mivolo_bias_beta": float(mivolo_bias_beta),
+        "confidence_aging": float(confidence_aging),
+        "confidence_rejuvenecer": float(confidence_rejuvenecer),
     })
     if generate_assisted_prompt_variant:
         summary_frame.attrs.update({

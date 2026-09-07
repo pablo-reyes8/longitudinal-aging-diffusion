@@ -63,7 +63,11 @@ def test_smart_sweep_searches_strength_uses_bias_band_and_zero_shortcut(
     assert old["trials_run"] == 5
     assert old["strength"] == pytest.approx(0.37)
     assert old["expected_mivolo_delta"] == pytest.approx(-3.19 + 0.841 * 39)
-    assert old["confidence_margin_years"] == 2.0
+    assert old["confidence_margin_years"] == 3.0
+    assert old["direction_policy"] == "aging_at_or_above_target"
+    assert old["selection_target_age"] == 65.0
+    assert old["acceptable_age_min"] == 65.0
+    assert old["acceptable_age_max"] == 68.0
     trials = frame.attrs["trials"]
     assert trials.groupby("target_age").size().to_dict() == {26.0: 1, 65.0: 5}
     assert trials.groupby("target_age")["selected_best"].sum().to_dict() == {
@@ -190,3 +194,59 @@ def test_assisted_smart_sweep_reuses_base_winners_without_repeating_search(
         "assisted_summary_csv_path",
     ):
         assert Path(frame.attrs[attr]).exists()
+
+
+def test_smart_sweep_uses_asymmetric_aging_and_correct_reverse_search_direction(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        "src.inference.smart_age_sweep.load_face_aging_adapter_for_inference",
+        lambda *args, **kwargs: {},
+    )
+    calls = []
+
+    def directional_inference(**kwargs):
+        strength = float(kwargs["strength"])
+        target_age = int(kwargs["target_age"])
+        calls.append((target_age, strength))
+        predicted = 39.0 + 100.0 * strength if target_age == 65 else 30.0 - 100.0 * strength
+        return {
+            "image": Image.new("RGB", (20, 20), "gray"),
+            "diagnostics": {
+                "predicted_source_age": 26.0,
+                "predicted_generated_age": predicted,
+                "identity_cosine_source_generated": 0.8,
+            },
+        }
+
+    monkeypatch.setattr(
+        "src.inference.smart_age_sweep.infer_face_aging", directional_inference
+    )
+    frame = diagnose_checkpoint_smart_age_sweep(
+        checkpoint_path=tmp_path / "adapter.pt",
+        bundle=_bundle(),
+        source_image=Image.new("RGB", (20, 20), "gray"),
+        source_age=26,
+        target_ages=[65, 15],
+        output_dir=tmp_path / "directional",
+        target_age_strength_map={65: 0.25, 15: 0.10},
+        confidence_aging=3.0,
+        confidence_rejuvenecer=2.0,
+        max_trials_per_target=2,
+        identity_tiebreak=False,
+        image_size=20,
+    )
+
+    aging_calls = [strength for age, strength in calls if age == 65]
+    reverse_calls = [strength for age, strength in calls if age == 15]
+    assert aging_calls == pytest.approx([0.25, 0.30])
+    assert reverse_calls == pytest.approx([0.10, 0.15])
+    aging, reverse = frame.iloc[0], frame.iloc[1]
+    # With no in-band candidate in two trials, overshoot 69 wins over undershoot 64.
+    assert aging["pred_age"] == pytest.approx(69.0)
+    assert aging["outside_confidence_error"] == pytest.approx(1.0)
+    assert not aging["within_confidence_band"]
+    assert reverse["direction_policy"] == "rejuvenation_mivolo_centered"
+    assert reverse["pred_age"] == pytest.approx(15.0)
+    assert reverse["outside_confidence_error"] == 0.0
