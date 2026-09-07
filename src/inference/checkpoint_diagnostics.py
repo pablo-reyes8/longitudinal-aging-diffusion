@@ -14,7 +14,11 @@ from .comparison_helpers import generate_adaptive_age_sweep, generate_strength_a
 from .delta_bin_evaluation import save_delta_bin_evaluation
 from .infer_face_aging import infer_face_aging, save_inference_image
 from .inference_utils import prepare_inference_image, tensor_to_pil
-from .prompt_assistance import resolve_prompt_assistance, stack_sweep_variants
+from .prompt_assistance import (
+    resolve_prompt_assistance,
+    stack_sweep_variants,
+    validate_prompt_assistance_scale,
+)
 
 
 DIAGNOSTIC_COLUMNS = [
@@ -324,6 +328,8 @@ def diagnose_checkpoint_adaptive_age_sweep(
     strict_config: bool = True,
     generate_assisted_prompt_variant: bool = False,
     prompt_assistance_config=None,
+    prompt_assistance_scale: float = 1.0,
+    negative_prompt_assistance_scale: float = 1.0,
     source_mouth_state: str = "auto",
     source_expression_state: str = "auto",
     save_prompt_comparison: bool = True,
@@ -334,6 +340,12 @@ def diagnose_checkpoint_adaptive_age_sweep(
     ages = [int(age) for age in target_ages]
     if not ages:
         raise ValueError("target_ages must not be empty")
+    prompt_assistance_scale = validate_prompt_assistance_scale(
+        prompt_assistance_scale, "prompt_assistance_scale"
+    )
+    negative_prompt_assistance_scale = validate_prompt_assistance_scale(
+        negative_prompt_assistance_scale, "negative_prompt_assistance_scale"
+    )
     load_face_aging_adapter_for_inference(bundle, checkpoint, strict_config=strict_config)
     destination = Path(output_dir).expanduser() if output_dir is not None else None
     base_grid_name = (
@@ -412,6 +424,8 @@ def diagnose_checkpoint_adaptive_age_sweep(
                 target_age=age,
                 source_age=source_age,
                 target_prompt=assistance["target_prompt"],
+                prompt_assistance_base_prompt=base_result["target_prompt"],
+                prompt_assistance_scale=prompt_assistance_scale,
                 mode="direct",
                 strength=float(base_result["effective_strength"]),
                 num_inference_steps=num_inference_steps,
@@ -420,6 +434,8 @@ def diagnose_checkpoint_adaptive_age_sweep(
                 age_guidance_scale=age_guidance_scale,
                 image_guidance_scale=image_guidance_scale,
                 negative_prompt=assistance["negative_prompt"],
+                negative_prompt_assistance_base_prompt=negative_prompt,
+                negative_prompt_assistance_scale=negative_prompt_assistance_scale,
                 prompt_style=prompt_style,
                 use_cfg=use_cfg,
                 seed=seed,
@@ -473,7 +489,15 @@ def diagnose_checkpoint_adaptive_age_sweep(
         assisted_frame["source_expression_state"] = [
             record["source_expression_state"] for record in prompt_records
         ]
+        assisted_frame["prompt_assistance_scale"] = float(prompt_assistance_scale)
+        assisted_frame["negative_prompt_assistance_scale"] = float(
+            negative_prompt_assistance_scale
+        )
         print("\n Prompt assistance | adaptive sweep")
+        print(
+            f"  Embedding scales | positive={float(prompt_assistance_scale):.3f} | "
+            f"negative={float(negative_prompt_assistance_scale):.3f}"
+        )
         for base_row, assisted_row in zip(rows, assisted_rows):
             print(
                 f"  target={int(base_row['target_age']):3d} | "

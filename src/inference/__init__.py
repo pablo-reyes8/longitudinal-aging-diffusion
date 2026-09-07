@@ -62,6 +62,7 @@ from .prompt_assistance import (
     DEFAULT_PROMPT_ASSISTANCE_CONFIG,
     resolve_prompt_assistance,
     stack_sweep_variants,
+    validate_prompt_assistance_scale,
 )
 from .smart_age_sweep import (
     DEFAULT_SMART_TARGET_STRENGTH_MAP,

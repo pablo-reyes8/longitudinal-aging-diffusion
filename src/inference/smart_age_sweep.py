@@ -12,7 +12,11 @@ from PIL import Image, ImageDraw
 from .checkpoint_loading import load_face_aging_adapter_for_inference
 from .infer_face_aging import infer_face_aging
 from .inference_utils import prepare_inference_image, tensor_to_pil
-from .prompt_assistance import resolve_prompt_assistance, stack_sweep_variants
+from .prompt_assistance import (
+    resolve_prompt_assistance,
+    stack_sweep_variants,
+    validate_prompt_assistance_scale,
+)
 from .prompt_building import build_inference_prompt_pack
 
 
@@ -216,6 +220,8 @@ def diagnose_checkpoint_smart_age_sweep(
     strict_config: bool = True,
     generate_assisted_prompt_variant: bool = False,
     prompt_assistance_config=None,
+    prompt_assistance_scale: float = 1.0,
+    negative_prompt_assistance_scale: float = 1.0,
     source_mouth_state: str = "auto",
     source_expression_state: str = "auto",
     save_prompt_comparison: bool = True,
@@ -245,6 +251,12 @@ def diagnose_checkpoint_smart_age_sweep(
         raise ValueError("strength search steps must be positive")
     if age_tolerance_years < 0 or identity_margin_for_tiebreak < 0:
         raise ValueError("age tolerance and identity tie-break margin must be non-negative")
+    prompt_assistance_scale = validate_prompt_assistance_scale(
+        prompt_assistance_scale, "prompt_assistance_scale"
+    )
+    negative_prompt_assistance_scale = validate_prompt_assistance_scale(
+        negative_prompt_assistance_scale, "negative_prompt_assistance_scale"
+    )
     _validate_strength_map(target_age_strength_map)
     # Validate the adaptive confidence policy once before loading/generating.
     adaptive_mivolo_confidence_margin(
@@ -462,6 +474,8 @@ def diagnose_checkpoint_smart_age_sweep(
                 target_age=target_age,
                 source_prompt=source_prompt,
                 target_prompt=assistance["target_prompt"],
+                prompt_assistance_base_prompt=base_target_prompt,
+                prompt_assistance_scale=prompt_assistance_scale,
                 mode="direct",
                 strength=float(base_row["strength"]),
                 num_inference_steps=num_inference_steps,
@@ -470,6 +484,8 @@ def diagnose_checkpoint_smart_age_sweep(
                 text_guidance_scale=float(base_row["text_guidance_scale"]),
                 image_guidance_scale=float(base_row["image_guidance_scale"]),
                 negative_prompt=assistance["negative_prompt"],
+                negative_prompt_assistance_base_prompt=negative_prompt,
+                negative_prompt_assistance_scale=negative_prompt_assistance_scale,
                 prompt_style=prompt_style,
                 use_cfg=use_cfg,
                 seed=seed,
@@ -519,6 +535,10 @@ def diagnose_checkpoint_smart_age_sweep(
         if prompt_records:
             print("  Positive support: " + ", ".join(prompt_records[0]["positive_terms"]))
             print("  Negative prompt: " + prompt_records[0]["negative_prompt"])
+            print(
+                f"  Embedding scales | positive={float(prompt_assistance_scale):.3f} | "
+                f"negative={float(negative_prompt_assistance_scale):.3f}"
+            )
 
     final_grid = _final_grid(source_image, source_age, selected_candidates, image_size)
     final_grid_path = destination / (
@@ -568,6 +588,10 @@ def diagnose_checkpoint_smart_age_sweep(
         assisted_frame["source_expression_state"] = [
             record["source_expression_state"] for record in prompt_records
         ]
+        assisted_frame["prompt_assistance_scale"] = float(prompt_assistance_scale)
+        assisted_frame["negative_prompt_assistance_scale"] = float(
+            negative_prompt_assistance_scale
+        )
         assisted_trials_path = destination / "smart_sweep_trials_assisted.csv"
         assisted_trials_frame = pd.DataFrame(
             assisted_rows, columns=SMART_TRIAL_COLUMNS
@@ -583,6 +607,12 @@ def diagnose_checkpoint_smart_age_sweep(
         ]
         assisted_trials_frame["source_expression_state"] = assisted_frame[
             "source_expression_state"
+        ]
+        assisted_trials_frame["prompt_assistance_scale"] = assisted_frame[
+            "prompt_assistance_scale"
+        ]
+        assisted_trials_frame["negative_prompt_assistance_scale"] = assisted_frame[
+            "negative_prompt_assistance_scale"
         ]
         assisted_trials_frame.to_csv(assisted_trials_path, index=False)
         assisted_summary_path = destination / "smart_sweep_summary_assisted.csv"

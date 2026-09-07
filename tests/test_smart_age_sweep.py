@@ -158,6 +158,8 @@ def test_assisted_smart_sweep_reuses_base_winners_without_repeating_search(
         output_dir=tmp_path / "assisted",
         target_age_strength_map={26: 0.04, 65: 0.25},
         generate_assisted_prompt_variant=True,
+        prompt_assistance_scale=0.35,
+        negative_prompt_assistance_scale=0.60,
         source_mouth_state="closed",
         image_size=24,
     )
@@ -171,7 +173,13 @@ def test_assisted_smart_sweep_reuses_base_winners_without_repeating_search(
     )
     assert all("keep lips closed" in call["target_prompt"] for call in assisted_calls)
     assert all("open mouth" in call["negative_prompt"] for call in assisted_calls)
+    assert all(call["prompt_assistance_scale"] == 0.35 for call in assisted_calls)
+    assert all(
+        call["negative_prompt_assistance_scale"] == 0.60
+        for call in assisted_calls
+    )
     assert frame.attrs["assisted"]["trials_run"].tolist() == [1, 1]
+    assert frame.attrs["assisted"]["prompt_assistance_scale"].tolist() == [0.35, 0.35]
     for attr in (
         "grid_path",
         "assisted_grid_path",

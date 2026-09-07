@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+import math
 
 from PIL import Image, ImageDraw
 
@@ -71,6 +72,19 @@ DEFAULT_PROMPT_ASSISTANCE_CONFIG = {
 
 _MOUTH_STATES = {"auto", "closed", "visible_teeth", "unknown"}
 _EXPRESSION_STATES = {"auto", "neutral", "smiling", "unknown"}
+
+
+def validate_prompt_assistance_scale(value, name: str) -> float:
+    """Accept non-negative finite interpolation/extrapolation scales."""
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a finite non-negative number")
+    try:
+        resolved = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite non-negative number") from exc
+    if not math.isfinite(resolved) or resolved < 0:
+        raise ValueError(f"{name} must be a finite non-negative number")
+    return resolved
 
 
 def _terms(value, name: str) -> list[str]:

@@ -220,6 +220,8 @@ def test_checkpoint_adaptive_sweep_can_save_base_and_assisted_variants(tmp_path)
         num_inference_steps=1,
         image_size=32,
         generate_assisted_prompt_variant=True,
+        prompt_assistance_scale=0.40,
+        negative_prompt_assistance_scale=0.70,
         source_mouth_state="visible_teeth",
         prompt_assistance_config={
             "positive_global_terms": ["custom realistic face"],
@@ -231,6 +233,8 @@ def test_checkpoint_adaptive_sweep_can_save_base_and_assisted_variants(tmp_path)
     assert assisted["effective_strength"].tolist() == frame["effective_strength"].tolist()
     assert assisted["support_prompt_used"].str.contains("custom realistic face").all()
     assert assisted["negative_prompt_used"].str.contains("custom artifact").all()
+    assert assisted["prompt_assistance_scale"].tolist() == [0.40, 0.40]
+    assert assisted["negative_prompt_assistance_scale"].tolist() == [0.70, 0.70]
     for name in (
         "adaptive_age_sweep_base.png",
         "adaptive_age_sweep_assisted.png",

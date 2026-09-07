@@ -31,6 +31,7 @@ from .inference_utils import (
     tensor_to_pil,
 )
 from .prompt_building import build_inference_prompt_pack
+from .prompt_assistance import validate_prompt_assistance_scale
 
 
 DEFAULT_STRENGTH_MAP = {
@@ -119,6 +120,30 @@ def _scale_model_input(scheduler, latents, timestep):
     return method(latents, timestep) if method is not None else latents
 
 
+def _encode_prompt_with_assistance_scale(
+    bundle,
+    *,
+    assisted_prompt: str,
+    base_prompt: str | None,
+    assistance_scale: float,
+    batch_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Interpolate only the CLIP embedding delta introduced by assistance."""
+    prompts = [assisted_prompt] * batch_size
+    if base_prompt is None or assistance_scale == 1.0:
+        return encode_prompts(bundle, prompts, device=device)
+    base_embeddings = encode_prompts(
+        bundle, [base_prompt] * batch_size, device=device
+    )
+    if assistance_scale == 0.0:
+        return base_embeddings
+    assisted_embeddings = encode_prompts(bundle, prompts, device=device)
+    return base_embeddings + float(assistance_scale) * (
+        assisted_embeddings - base_embeddings
+    )
+
+
 def resolve_inference_strength(
     *,
     strength: float,
@@ -153,8 +178,12 @@ def _direct_latent_edit(
     bundle,
     source_latents: torch.Tensor,
     target_prompt: str,
+    prompt_assistance_base_prompt: str | None,
+    prompt_assistance_scale: float,
     reference_prompt: str,
     negative_prompt: str,
+    negative_prompt_assistance_base_prompt: str | None,
+    negative_prompt_assistance_scale: float,
     scheduler,
     num_inference_steps: int,
     strength: float,
@@ -177,11 +206,31 @@ def _direct_latent_edit(
     repeated_timestep = start_timestep.reshape(1).expand(source_latents.shape[0])
     latents = scheduler.add_noise(source_latents, noise, repeated_timestep)
     initial_latents = latents.detach().cpu().clone()
-    embeddings = encode_prompts(bundle, [target_prompt] * source_latents.shape[0], device=source_latents.device)
-    reference_embeddings = encode_prompts(
-        bundle, [reference_prompt] * source_latents.shape[0], device=source_latents.device
+    embeddings = _encode_prompt_with_assistance_scale(
+        bundle,
+        assisted_prompt=target_prompt,
+        base_prompt=prompt_assistance_base_prompt,
+        assistance_scale=prompt_assistance_scale,
+        batch_size=source_latents.shape[0],
+        device=source_latents.device,
     )
-    null_embeddings = encode_prompts(bundle, [negative_prompt], device=source_latents.device)
+    null_embeddings = _encode_prompt_with_assistance_scale(
+        bundle,
+        assisted_prompt=negative_prompt,
+        base_prompt=negative_prompt_assistance_base_prompt,
+        assistance_scale=negative_prompt_assistance_scale,
+        batch_size=1,
+        device=source_latents.device,
+    )
+    reference_embeddings = (
+        null_embeddings
+        if reference_prompt == negative_prompt
+        else encode_prompts(
+            bundle,
+            [reference_prompt] * source_latents.shape[0],
+            device=source_latents.device,
+        )
+    )
     trajectory = [initial_latents] if return_intermediates else None
     guided_norms = []
     for timestep in denoising_timesteps:
@@ -252,6 +301,10 @@ def infer_face_aging(
     age_guidance_scale: float = 3.0,
     image_guidance_scale: float = 1.5,
     negative_prompt: str = "",
+    prompt_assistance_base_prompt: str | None = None,
+    negative_prompt_assistance_base_prompt: str | None = None,
+    prompt_assistance_scale: float = 1.0,
+    negative_prompt_assistance_scale: float = 1.0,
     prompt_style: str = "selfage",
     use_cfg: bool = True,
     seed: int = 42,
@@ -277,6 +330,12 @@ def infer_face_aging(
         raise ValueError("text_reference_mode must be 'null', 'generic', or 'source_age'")
     if age_guidance_scale < 0:
         raise ValueError("age_guidance_scale must be non-negative")
+    prompt_assistance_scale = validate_prompt_assistance_scale(
+        prompt_assistance_scale, "prompt_assistance_scale"
+    )
+    negative_prompt_assistance_scale = validate_prompt_assistance_scale(
+        negative_prompt_assistance_scale, "negative_prompt_assistance_scale"
+    )
     prompt_pack = build_inference_prompt_pack(
         target_prompt=target_prompt, target_age=target_age,
         source_prompt=source_prompt, source_age=source_age,
@@ -390,8 +449,14 @@ def infer_face_aging(
             edit = _direct_latent_edit(
                 bundle=bundle, source_latents=source_latents,
                 target_prompt=prompt_pack["target_prompt"],
+                prompt_assistance_base_prompt=prompt_assistance_base_prompt,
+                prompt_assistance_scale=prompt_assistance_scale,
                 reference_prompt=reference_prompt,
                 negative_prompt=negative_prompt,
+                negative_prompt_assistance_base_prompt=(
+                    negative_prompt_assistance_base_prompt
+                ),
+                negative_prompt_assistance_scale=negative_prompt_assistance_scale,
                 scheduler=scheduler, num_inference_steps=num_inference_steps,
                 strength=effective_strength,
                 text_guidance_scale=text_guidance_scale,
@@ -469,6 +534,12 @@ def infer_face_aging(
             "image_size": image_size,
             "use_cfg": use_cfg,
             "negative_prompt": negative_prompt,
+            "prompt_assistance_base_prompt": prompt_assistance_base_prompt,
+            "negative_prompt_assistance_base_prompt": (
+                negative_prompt_assistance_base_prompt
+            ),
+            "prompt_assistance_scale": prompt_assistance_scale,
+            "negative_prompt_assistance_scale": negative_prompt_assistance_scale,
             "prompt_style": prompt_style,
             "prompt_warnings": prompt_pack["warnings"],
             "use_age_delta_conditioning": resolved_age_conditioning,

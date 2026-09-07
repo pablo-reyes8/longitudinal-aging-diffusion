@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import pytest
+import torch
 
 from src.inference import resolve_prompt_assistance
+from src.inference.infer_face_aging import _encode_prompt_with_assistance_scale
+from src.model import encode_prompts
+from training_fakes import make_training_bundle
 
 
 def test_prompt_assistance_is_concise_deduplicated_and_state_aware():
@@ -43,3 +47,41 @@ def test_custom_term_lists_replace_defaults_and_auto_falls_back_to_unknown():
         resolve_prompt_assistance(
             base_target_prompt="base", prompt_assistance_config={"typo": []}
         )
+
+
+def test_prompt_assistance_scale_interpolates_only_embedding_delta():
+    bundle = make_training_bundle(seed=941)
+    device = torch.device("cpu")
+    base_prompt = "photo of a person as 40-year-old"
+    assisted_prompt = base_prompt + ", preserve facial identity"
+    base = encode_prompts(bundle, [base_prompt], device=device)
+    assisted = encode_prompts(bundle, [assisted_prompt], device=device)
+
+    zero = _encode_prompt_with_assistance_scale(
+        bundle,
+        assisted_prompt=assisted_prompt,
+        base_prompt=base_prompt,
+        assistance_scale=0.0,
+        batch_size=1,
+        device=device,
+    )
+    partial = _encode_prompt_with_assistance_scale(
+        bundle,
+        assisted_prompt=assisted_prompt,
+        base_prompt=base_prompt,
+        assistance_scale=0.35,
+        batch_size=1,
+        device=device,
+    )
+    full = _encode_prompt_with_assistance_scale(
+        bundle,
+        assisted_prompt=assisted_prompt,
+        base_prompt=base_prompt,
+        assistance_scale=1.0,
+        batch_size=1,
+        device=device,
+    )
+
+    assert torch.equal(zero, base)
+    assert torch.equal(full, assisted)
+    assert torch.allclose(partial, base + 0.35 * (assisted - base))
