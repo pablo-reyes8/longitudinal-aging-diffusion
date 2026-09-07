@@ -58,6 +58,12 @@ from .inference_utils import (
     tensor_to_pil,
 )
 from .prompt_building import build_inference_prompt_pack, extract_prompt_age
+from .smart_age_sweep import (
+    DEFAULT_SMART_TARGET_STRENGTH_MAP,
+    SMART_TRIAL_COLUMNS,
+    adaptive_mivolo_confidence_margin,
+    diagnose_checkpoint_smart_age_sweep,
+)
 from .validation_inference_pipeline import run_inference_pipeline_validation
 
 __all__ = [name for name in globals() if not name.startswith("_")]
