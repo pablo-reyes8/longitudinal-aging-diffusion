@@ -51,23 +51,6 @@ src/inference/        Direct editing, three-way CFG, and DDIM inversion
 tests/                Strict numerical, structural, and integration tests
 ```
 
-## Dataset convention
-
-Each identity has a directory. The numeric filename prefix is the observed age;
-suffixes distinguish multiple photographs at the same age.
-
-```text
-dataset_root/
-└── id_0001/
-    ├── 18.jpg
-    ├── 38.jpg
-    ├── 38_1.jpg
-    └── 52.png
-```
-
-Only forward pairs from the same identity are generated (`target_age >
-source_age`). Labels such as `501.jpg` are audited and normalized to age `51`.
-The `data/sample` directory is intentionally ignored by Git.
 
 ## Installation
 
