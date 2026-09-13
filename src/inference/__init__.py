@@ -72,6 +72,7 @@ from .smart_age_sweep import (
     diagnose_checkpoint_smart_age_sweep,
     source_specific_mivolo_bias_weight,
 )
+from .source_image_loading import load_sweep_source_image
 from .validation_inference_pipeline import run_inference_pipeline_validation
 
 __all__ = [name for name in globals() if not name.startswith("_")]

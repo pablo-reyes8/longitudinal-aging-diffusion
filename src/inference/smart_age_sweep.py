@@ -18,6 +18,7 @@ from .prompt_assistance import (
     validate_prompt_assistance_scale,
 )
 from .prompt_building import build_inference_prompt_pack
+from .source_image_loading import load_sweep_source_image
 
 
 DEFAULT_SMART_TARGET_STRENGTH_MAP = {
@@ -410,6 +411,9 @@ def diagnose_checkpoint_smart_age_sweep(
         negative_prompt_assistance_scale, "negative_prompt_assistance_scale"
     )
     _validate_strength_map(target_age_strength_map)
+    source_image = load_sweep_source_image(
+        source_image, image_size=image_size
+    )
     checkpoint = Path(checkpoint_path).expanduser()
     destination = Path(output_dir).expanduser()
     destination.mkdir(parents=True, exist_ok=True)

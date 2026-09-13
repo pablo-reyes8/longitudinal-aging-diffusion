@@ -19,6 +19,7 @@ from .prompt_assistance import (
     stack_sweep_variants,
     validate_prompt_assistance_scale,
 )
+from .source_image_loading import load_sweep_source_image
 
 
 DIAGNOSTIC_COLUMNS = [
@@ -345,6 +346,9 @@ def diagnose_checkpoint_adaptive_age_sweep(
     )
     negative_prompt_assistance_scale = validate_prompt_assistance_scale(
         negative_prompt_assistance_scale, "negative_prompt_assistance_scale"
+    )
+    source_image = load_sweep_source_image(
+        source_image, image_size=image_size
     )
     load_face_aging_adapter_for_inference(bundle, checkpoint, strict_config=strict_config)
     destination = Path(output_dir).expanduser() if output_dir is not None else None
