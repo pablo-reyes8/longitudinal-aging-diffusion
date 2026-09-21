@@ -1,4 +1,4 @@
-"""Load diagnostic source images without silently upsampling low-resolution input."""
+"""Load diagnostic source images with explicit, conservative resolution handling."""
 
 from __future__ import annotations
 
@@ -50,8 +50,26 @@ def load_sweep_source_image(
     *,
     image_size: int,
     timeout_seconds: float = 15.0,
+    allow_lanczos_upscale: bool = False,
+    minimum_upscale_size: int = 300,
 ):
-    """Resolve HTTP(S), local, PIL, or tensor input and forbid upsampling."""
+    """Resolve HTTP(S), local, PIL, or tensor input.
+
+    By default, inputs smaller than ``image_size`` are rejected. When explicitly
+    enabled for PIL-backed inputs, images whose two dimensions are at least
+    ``minimum_upscale_size`` are center-fitted to the requested square size with
+    Lanczos resampling. Tensor inputs are never silently resampled.
+    """
+    image_size = int(image_size)
+    minimum_upscale_size = int(minimum_upscale_size)
+    if image_size <= 0:
+        raise ValueError("image_size must be positive")
+    if allow_lanczos_upscale and (
+        minimum_upscale_size <= 0 or minimum_upscale_size > image_size
+    ):
+        raise ValueError(
+            "minimum_upscale_size must be positive and no greater than image_size"
+        )
     if isinstance(source_image, str):
         parsed = urlparse(source_image)
         if parsed.scheme in {"http", "https"}:
@@ -70,9 +88,25 @@ def load_sweep_source_image(
         if source_image.ndim not in {3, 4}:
             raise ValueError("Tensor image must have shape [3,H,W] or [B,3,H,W]")
         height, width = source_image.shape[-2:]
-        _validate_minimum_resolution(int(width), int(height), int(image_size))
+        _validate_minimum_resolution(int(width), int(height), image_size)
         return source_image
     else:
         raise TypeError("source_image must be an HTTP(S) URL, local path, PIL image, or tensor")
-    _validate_minimum_resolution(*image.size, int(image_size))
+    width, height = image.size
+    if width >= image_size and height >= image_size:
+        return image
+    if allow_lanczos_upscale:
+        if width < minimum_upscale_size or height < minimum_upscale_size:
+            raise ValueError(
+                f"Source image resolution is {width}x{height}; the minimum supported "
+                f"resolution is {minimum_upscale_size}x{minimum_upscale_size} for "
+                f"Lanczos upscaling to {image_size}x{image_size}."
+            )
+        return ImageOps.fit(
+            image,
+            (image_size, image_size),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.5),
+        )
+    _validate_minimum_resolution(width, height, image_size)
     return image

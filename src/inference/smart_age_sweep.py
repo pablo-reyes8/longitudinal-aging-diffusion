@@ -412,7 +412,10 @@ def diagnose_checkpoint_smart_age_sweep(
     )
     _validate_strength_map(target_age_strength_map)
     source_image = load_sweep_source_image(
-        source_image, image_size=image_size
+        source_image,
+        image_size=image_size,
+        allow_lanczos_upscale=True,
+        minimum_upscale_size=min(300, int(image_size)),
     )
     checkpoint = Path(checkpoint_path).expanduser()
     destination = Path(output_dir).expanduser()

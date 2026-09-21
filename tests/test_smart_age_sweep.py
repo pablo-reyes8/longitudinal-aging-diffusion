@@ -101,6 +101,30 @@ def test_smart_sweep_searches_strength_uses_bias_band_and_zero_shortcut(
     assert not list((tmp_path / "results").rglob("trial_*.png"))
 
 
+def test_smart_sweep_accepts_300px_pil_source_via_conservative_upscale(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        "src.inference.smart_age_sweep.load_face_aging_adapter_for_inference",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr("src.inference.smart_age_sweep.infer_face_aging", _fake_inference)
+
+    frame = diagnose_checkpoint_smart_age_sweep(
+        checkpoint_path=tmp_path / "adapter.pt",
+        bundle=_bundle(),
+        source_image=Image.new("RGB", (360, 300), "gray"),
+        source_age=26,
+        target_ages=[26],
+        output_dir=tmp_path / "results",
+        image_size=400,
+    )
+
+    assert frame["target_age"].tolist() == [26.0]
+    assert Path(frame.attrs["grid_path"]).exists()
+
+
 def test_smart_sweep_nearest_prior_unbiased_mode_and_micro_search_are_reproducible(
     monkeypatch,
     tmp_path,

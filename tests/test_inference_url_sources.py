@@ -70,6 +70,31 @@ def test_downloaded_low_resolution_image_is_rejected(monkeypatch):
         load_sweep_source_image("http://example.test/small.jpg", image_size=400)
 
 
+def test_opt_in_lanczos_upscale_accepts_300px_source_and_returns_exact_model_size():
+    source = Image.new("RGB", (360, 300), "gray")
+
+    image = load_sweep_source_image(
+        source,
+        image_size=400,
+        allow_lanczos_upscale=True,
+        minimum_upscale_size=300,
+    )
+
+    assert image.size == (400, 400)
+
+
+def test_opt_in_lanczos_upscale_still_rejects_source_below_300px():
+    source = Image.new("RGB", (360, 299), "gray")
+
+    with pytest.raises(ValueError, match="minimum supported resolution is 300x300"):
+        load_sweep_source_image(
+            source,
+            image_size=400,
+            allow_lanczos_upscale=True,
+            minimum_upscale_size=300,
+        )
+
+
 def test_non_http_url_scheme_is_rejected():
     with pytest.raises(ValueError, match="Only HTTP and HTTPS"):
         load_sweep_source_image("ftp://example.test/portrait.jpg", image_size=400)
