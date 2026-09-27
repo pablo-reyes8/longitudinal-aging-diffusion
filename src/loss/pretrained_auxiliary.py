@@ -103,8 +103,10 @@ def _load_arcface(
         from safetensors.torch import load_file
     except ImportError as exc:
         raise ImportError(
-            "ArcFace loading requires the optional auxiliary dependencies. "
-            "Install this project with: pip install -e '.[auxiliary]'"
+            "ArcFace loading requires py-feat from the auxiliary dependencies. "
+            "Install with: pip install -e '.[auxiliary]'. "
+            "MiVOLO must be installed separately with --no-deps because its "
+            "timm pin conflicts with py-feat."
         ) from exc
     model = ArcFace(backbone="r50")
     weights = hf_hub_download(

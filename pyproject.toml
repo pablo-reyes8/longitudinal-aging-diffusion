@@ -36,10 +36,11 @@ dependencies = [
 notebooks = ["jupyterlab>=4,<5", "ipykernel>=6,<7", "matplotlib>=3.8,<4"]
 auxiliary = [
   "py-feat>=2.1.1; python_version >= '3.11'",
-  "mivolo @ git+https://github.com/WildChlamydia/MiVOLO.git@main",
   "transformers>=4.51,<5",
   "accelerate>=1.8.1,<2",
 ]
+# MiVOLO is installed separately with --no-deps. Its upstream package pins
+# timm==0.8.13.dev0, which conflicts with py-feat's timm>=1.0.11 requirement.
 comparison = [
   "torchvision>=0.16,<1",
   "matplotlib>=3.8,<4",

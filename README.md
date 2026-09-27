@@ -59,10 +59,15 @@ Activate the existing environment and install the project in editable mode:
 ```bash
 conda activate deep_learning
 python -m pip install -e ".[auxiliary,dev,notebooks]"
+# Install MiVOLO separately without dependencies because its old timm pin
+# conflicts with the timm version required by py-feat:
+python -m pip install --no-deps "git+https://github.com/WildChlamydia/MiVOLO.git@main"
 ```
 
 The ArcFace auxiliary extra requires Python 3.11 or newer. Core data, model,
 loss, training, and inference modules remain compatible with Python 3.10.
+MiVOLO is installed with `--no-deps` because its fixed `timm==0.8.13.dev0`
+dependency conflicts with `py-feat`, which requires `timm>=1.0.11`.
 
 On a GPU server, install the PyTorch build matching its CUDA version first.
 `xformers` is optional and must match both PyTorch and CUDA:
