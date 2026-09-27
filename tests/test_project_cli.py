@@ -21,7 +21,9 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_project_metadata_and_required_quality_files_exist():
     metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert metadata["project"]["name"] == "longitudinal-face-aging"
-    assert set(metadata["project"]["scripts"]) == {"aging-data", "aging-train", "aging-infer"}
+    assert set(metadata["project"]["scripts"]) == {
+        "aging-data", "aging-train", "aging-infer", "aging-compare",
+    }
     for name in ("LICENSE", "CONTRIBUTING.md", "Dockerfile", "compose.yaml", ".dockerignore"):
         assert (ROOT / name).is_file()
 
