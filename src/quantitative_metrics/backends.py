@@ -136,6 +136,15 @@ class DexAgeEstimator:
         checkpoint = Path(checkpoint_path).expanduser().resolve()
         if not prototxt.is_file() or not checkpoint.is_file():
             raise FileNotFoundError("DEX prototxt and checkpoint must both exist locally")
+        if not hasattr(cv2.dnn, "readNetFromCaffe"):
+            version = getattr(cv2, "__version__", "unknown")
+            raise RuntimeError(
+                "DEX evaluation requires OpenCV 4.x with dnn.readNetFromCaffe; "
+                f"detected OpenCV {version}. OpenCV 5 removed the Caffe reader. "
+                "In Colab, run `%pip uninstall -y opencv-python opencv-python-headless "
+                "opencv-contrib-python opencv-contrib-python-headless` followed by "
+                "`%pip install 'opencv-python-headless>=4.8,<5'`, then restart the runtime."
+            )
         self.cv2 = cv2
         self.net = cv2.dnn.readNetFromCaffe(str(prototxt), str(checkpoint))
         if device == "cuda":

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import json
+import math
 import platform
 import subprocess
 from datetime import datetime, timezone
@@ -16,7 +17,18 @@ from data import build_face_aging_dataloaders
 from src.loss import FaceAgingDiffusionLoss
 from src.model import build_face_aging_diffusion_bundle
 from src.quantitative_metrics import load_quantitative_metrics
-from src.training import TRAIN_AGGING_MODEL, set_seed
+from src.training import (
+    TRAIN_AGGING_MODEL,
+    run_training_step,
+    set_seed,
+    setup_device_and_precision,
+    estimate_optimizer_steps,
+)
+from src.training.mixed_precision import move_batch_to_device
+from src.training.train_face_aging import (
+    _enable_memory_features,
+    _move_training_objects,
+)
 
 from .config import resolve_training_ablation_config
 from .evaluation import AblationEpochEvaluator
@@ -40,6 +52,14 @@ def _write_json(path: Path, value: Any) -> None:
 def _prepare_resolved_config(
     path: Path, config: Mapping[str, Any], *, resume: bool, overwrite: bool
 ) -> None:
+    _validate_resolved_config(path, config, resume=resume, overwrite=overwrite)
+    normalized = json.loads(json.dumps(config, default=str))
+    _write_json(path, normalized)
+
+
+def _validate_resolved_config(
+    path: Path, config: Mapping[str, Any], *, resume: bool, overwrite: bool
+) -> None:
     normalized = json.loads(json.dumps(config, default=str))
     if path.exists():
         existing = json.loads(path.read_text(encoding="utf-8"))
@@ -55,7 +75,6 @@ def _prepare_resolved_config(
             )
     elif resume:
         raise FileNotFoundError(f"Cannot resume: {path} does not exist")
-    _write_json(path, normalized)
 
 
 def _archive_existing_case(case_dir: Path) -> Path | None:
@@ -143,6 +162,263 @@ def _load_metrics(metrics_config: Mapping[str, Any] | None):
         options.setdefault("local_files_only", True)
         bundle = load_quantitative_metrics(**options)
     return bundle, evaluation
+
+
+def _case_data_loaders(config, dataset_root, kaggle_path):
+    data_config = dict(config["data"])
+    data_config["seed"] = config["training"]["seed"]
+    if data_config["include_kaggle"]:
+        if kaggle_path is None:
+            raise ValueError("Canonical ablation data uses FG-NET; provide kaggle_path")
+        data_config["kaggle_path"] = kaggle_path
+    return build_face_aging_dataloaders(dataset_root, **data_config)
+
+
+def _loader_batch_preserving_state(loader):
+    generator = getattr(loader, "generator", None)
+    generator_state = generator.get_state() if generator is not None else None
+    persistent_workers = getattr(loader, "persistent_workers", False)
+    iterator = None
+    if persistent_workers:
+        loader.persistent_workers = False
+    try:
+        iterator = iter(loader)
+        batch = next(iterator, None)
+        if batch is None:
+            raise ValueError("DataLoader produced no batch")
+        return batch
+    finally:
+        if iterator is not None:
+            shutdown = getattr(iterator, "_shutdown_workers", None)
+            if shutdown is not None:
+                shutdown()
+            del iterator
+        if generator is not None and generator_state is not None:
+            generator.set_state(generator_state)
+        if persistent_workers:
+            loader.persistent_workers = True
+
+
+def _validate_batch_finite(batch, *, image_size: int) -> int:
+    required = ("source_image", "target_image", "source_age", "target_age", "delta_age")
+    missing = [key for key in required if key not in batch]
+    if missing:
+        raise ValueError(f"Training batch is missing required tensors: {missing}")
+    source = batch["source_image"]
+    target = batch["target_image"]
+    if source.ndim != 4 or target.shape != source.shape:
+        raise ValueError(
+            "source_image and target_image must have matching [B, C, H, W] shapes; "
+            f"got {tuple(source.shape)} and {tuple(target.shape)}"
+        )
+    if source.shape[1:] != (3, int(image_size), int(image_size)):
+        raise ValueError(
+            f"Images must have shape [B, 3, {image_size}, {image_size}], "
+            f"got {tuple(source.shape)}"
+        )
+    batch_size = int(source.shape[0])
+    for key in required[2:]:
+        value = batch[key]
+        if not torch.is_tensor(value) or value.shape != (batch_size,):
+            raise ValueError(f"{key} must be a tensor with shape [{batch_size}]")
+        if not bool(torch.isfinite(value).all()):
+            raise ValueError(f"{key} contains non-finite values")
+    if not bool(torch.isfinite(source).all()) or not bool(torch.isfinite(target).all()):
+        raise ValueError("Training images contain non-finite values")
+    prompts = batch.get("target_prompt")
+    if prompts is None or len(prompts) != batch_size:
+        raise ValueError(f"target_prompt must contain {batch_size} prompts")
+    return batch_size
+
+
+def _smoke_test_case(
+    *,
+    config: Mapping[str, Any],
+    loaders,
+    device,
+    model_dtype,
+    local_files_only,
+    token,
+    revision,
+) -> None:
+    training = config["training"]
+    data = config["data"]
+    set_seed(training["seed"], deterministic=training["deterministic"])
+    raw_batch = _loader_batch_preserving_state(loaders["train"])
+    batch_size = _validate_batch_finite(raw_batch, image_size=data["image_size"])
+
+    model_config = dict(config["model"])
+    auxiliary_name = model_config.pop("auxiliary_dtype")
+    model_config["auxiliary_dtype"] = _resolve_dtype(auxiliary_name, device)
+    bundle = loss_fn = None
+    try:
+        bundle = build_face_aging_diffusion_bundle(
+            **model_config,
+            device=device,
+            dtype=model_dtype,
+            local_files_only=local_files_only,
+            token=token,
+            revision=revision,
+        )
+        loss_fn = FaceAgingDiffusionLoss(
+            scheduler=bundle["scheduler_train"],
+            vae=bundle["vae"],
+            identity_encoder=bundle.get("identity_encoder"),
+            age_estimator=bundle.get("age_estimator"),
+            **config["loss"],
+        )
+
+        precision = setup_device_and_precision(
+            device,
+            amp_enabled=training["amp_enabled"],
+            amp_dtype=training["amp_dtype"],
+        )
+        _move_training_objects(bundle, loss_fn, precision["device"])
+        _enable_memory_features(
+            bundle,
+            gradient_checkpointing=training["gradient_checkpointing"],
+            enable_xformers=training["enable_xformers"],
+        )
+        loss_fn.min_snr_gamma = config["loss"]["min_snr_gamma"]
+        loss_fn.auxiliary_max_timestep = config["loss"]["auxiliary_max_timestep"]
+        if len(loaders["val"]) < 1:
+            raise ValueError("Validation DataLoader has no batches")
+        scheduler = bundle["scheduler_train"]
+        total_timesteps = len(scheduler.alphas_cumprod)
+        min_timestep = int(training["min_train_timestep"])
+        max_timestep = (
+            total_timesteps - 1
+            if training["max_train_timestep"] is None
+            else int(training["max_train_timestep"])
+        )
+        if min_timestep < 0 or max_timestep < min_timestep or max_timestep >= total_timesteps:
+            raise ValueError(
+                f"Invalid training timestep range [{min_timestep}, {max_timestep}] "
+                f"for scheduler with {total_timesteps} steps"
+            )
+        smoke_timestep = min_timestep
+        moved_batch = move_batch_to_device(raw_batch, precision["device"])
+        bundle["unet"].train()
+        if bundle.get("age_delta_conditioner") is not None:
+            bundle["age_delta_conditioner"].train()
+        with torch.no_grad():
+            result = run_training_step(
+                bundle=bundle,
+                loss_fn=loss_fn,
+                batch=moved_batch,
+                device=precision["device"],
+                amp_enabled=precision["amp_enabled"],
+                amp_dtype=training["amp_dtype"],
+                conditioning_dropout_prob=training["conditioning_dropout_prob"],
+                target_prompt_policy=training["target_prompt_policy"],
+                generic_prompt_prob=training["generic_prompt_prob"],
+                numeric_prompt_prob=training["numeric_prompt_prob"],
+                timestep_sampling=training["timestep_sampling"],
+                min_train_timestep=min_timestep,
+                max_train_timestep=max_timestep,
+                sample_source_posterior=training["sample_source_posterior"],
+                sample_target_posterior=training["sample_target_posterior"],
+                noise_offset=training["noise_offset"],
+                identity_loss_on_image_dropped_samples=training[
+                    "identity_loss_on_image_dropped_samples"
+                ],
+                timesteps=torch.full(
+                    (batch_size,), smoke_timestep, dtype=torch.long, device=precision["device"]
+                ),
+                dropout_random_values=torch.ones(batch_size, device=precision["device"]),
+                global_step=0,
+            )
+        loss = result["loss_out"]["loss"]
+        if loss.ndim != 0 or not bool(torch.isfinite(loss)):
+            raise RuntimeError(f"Smoke forward produced a non-finite scalar loss: {loss}")
+        del result, loss, moved_batch, raw_batch
+    finally:
+        del loss_fn, bundle
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
+def _preflight_cases(
+    *,
+    case_ids,
+    configs,
+    dataset_root,
+    kaggle_path,
+    evaluate_each_epoch,
+    evaluate_final,
+    epoch_eval_size,
+    final_eval_size,
+    explicit_pairs,
+    device,
+    model_dtype,
+    local_files_only,
+    token,
+    revision,
+):
+    prepared = {}
+    shared_panel = None
+    for case_id in case_ids:
+        print(f"\n[preflight] Validating ablation case {case_id}...")
+        config = configs[case_id]
+        try:
+            set_seed(config["training"]["seed"], deterministic=config["training"]["deterministic"])
+            loaders, data_metadata = _case_data_loaders(config, dataset_root, kaggle_path)
+            full_panel = epoch_panel = None
+            if evaluate_each_epoch or evaluate_final:
+                full_panel = build_fixed_evaluation_panel(
+                    loaders["val"], size=final_eval_size, explicit_pairs=explicit_pairs
+                )
+                if shared_panel is None:
+                    shared_panel = full_panel
+                elif full_panel != shared_panel:
+                    raise ValueError("This case produced a different fixed validation panel")
+                epoch_panel = full_panel[: min(len(full_panel), int(epoch_eval_size))]
+            _smoke_test_case(
+                config=config,
+                loaders=loaders,
+                device=device,
+                model_dtype=model_dtype,
+                local_files_only=local_files_only,
+                token=token,
+                revision=revision,
+            )
+            prepared[case_id] = {
+                "loaders": loaders,
+                "data_metadata": data_metadata,
+                "full_panel": full_panel,
+                "epoch_panel": epoch_panel,
+            }
+            print(f"[preflight {case_id}] OK: setup and one-microbatch forward/loss ready")
+        except Exception as exc:
+            prepared.clear()
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            raise RuntimeError(
+                f"Preflight failed for ablation case {case_id}; no ablation training has started: {exc}"
+            ) from exc
+    return prepared
+
+
+def _top_validation_epochs(training_state, checkpoint_dir: Path, *, limit: int = 3):
+    """Rank saved epoch snapshots by the checkpoint-selection validation loss."""
+    ranked = []
+    for record in training_state.get("history", {}).get("epochs", []):
+        validation = record.get("val")
+        value = validation.get("val/loss_total") if validation else None
+        if value is None or not math.isfinite(float(value)):
+            continue
+        epoch = int(record["epoch"]) + 1
+        ranked.append({
+            "epoch": epoch,
+            "validation_loss": float(value),
+            "checkpoint_path": str(
+                checkpoint_dir / f"epoch_{epoch:03d}" / "adapter_inference.pt"
+            ),
+        })
+    ranked.sort(key=lambda entry: (entry["validation_loss"], entry["epoch"]))
+    return [dict(rank=index + 1, **entry) for index, entry in enumerate(ranked[:limit])]
 
 
 def ablation_studies(
@@ -269,6 +545,10 @@ def ablation_studies(
         section_overrides.setdefault(section, {})
         section_overrides[section].update({key: value for key, value in values.items() if value is not None})
     section_overrides = {key: value for key, value in section_overrides.items() if value}
+    configs = {
+        case_id: resolve_training_ablation_config(case_id, section_overrides)
+        for case_id in case_ids
+    }
 
     resolved_device = _resolve_device(device)
     model_dtype = _resolve_dtype(dtype, resolved_device)
@@ -277,8 +557,62 @@ def ablation_studies(
     reports: dict[int, dict[str, Any]] = {}
     shared_panel_path = root / "fixed_validation_panel.json"
 
+    # Catch output/resume conflicts across every requested case before a prior
+    # case can spend time training and leave later cases unable to start.
     for case_id in case_ids:
-        config = resolve_training_ablation_config(case_id, section_overrides)
+        config = configs[case_id]
+        case_name = f"case_{case_id:02d}_{config['ablation']['slug']}"
+        case_dir = root / case_name
+        _validate_resolved_config(
+            case_dir / "resolved_config.json",
+            config,
+            resume=bool(resume),
+            overwrite=bool(overwrite),
+        )
+        if resume:
+            resume_checkpoint_dir = (
+                case_dir / "checkpoints"
+                if checkpoint_root is None
+                else Path(checkpoint_root) / case_name
+            )
+            resume_checkpoint = (
+                resume_checkpoint_dir / "latest" / "training_resume.pt"
+                if resume is True
+                else Path(resume)
+            )
+            if not resume_checkpoint.is_file():
+                raise FileNotFoundError(f"Resume checkpoint not found: {resume_checkpoint}")
+
+    prepared_cases = {}
+    if len(case_ids) > 1:
+        print(
+            "\nMulti-case preflight is mandatory: each requested ablation gets "
+            "one real microbatch forward/loss check before any training starts."
+        )
+        prepared_cases = _preflight_cases(
+            case_ids=case_ids,
+            configs=configs,
+            dataset_root=dataset_root,
+            kaggle_path=kaggle_path,
+            evaluate_each_epoch=evaluate_each_epoch,
+            evaluate_final=evaluate_final,
+            epoch_eval_size=epoch_eval_size,
+            final_eval_size=final_eval_size,
+            explicit_pairs=explicit_pairs,
+            device=resolved_device,
+            model_dtype=model_dtype,
+            local_files_only=local_files_only,
+            token=token,
+            revision=revision,
+        )
+        if evaluate_each_epoch or evaluate_final:
+            persist_fixed_evaluation_panel(
+                prepared_cases[case_ids[0]]["full_panel"], shared_panel_path
+            )
+        print("\nAll ablation preflights passed; starting sequential training.\n")
+
+    for case_id in case_ids:
+        config = configs[case_id]
         slug = config["ablation"]["slug"]
         case_name = f"case_{case_id:02d}_{slug}"
         case_dir = root / case_name
@@ -290,26 +624,27 @@ def ablation_studies(
             resolved_path, config, resume=bool(resume), overwrite=bool(overwrite)
         )
 
-        # Adapter and age-conditioner weights are random; reset before model
-        # construction so every case starts from the same scientific seed.
-        set_seed(config["training"]["seed"], deterministic=config["training"]["deterministic"])
-
-        data_config = dict(config["data"])
-        data_config["seed"] = config["training"]["seed"]
-        if data_config["include_kaggle"]:
-            if kaggle_path is None:
-                raise ValueError("Canonical ablation data uses FG-NET; provide kaggle_path")
-            data_config["kaggle_path"] = kaggle_path
-        loaders, data_metadata = build_face_aging_dataloaders(dataset_root, **data_config)
-
-        full_panel = None
-        epoch_panel = None
-        if evaluate_each_epoch or evaluate_final:
-            full_panel = build_fixed_evaluation_panel(
-                loaders["val"], size=final_eval_size, explicit_pairs=explicit_pairs
+        prepared = prepared_cases.pop(case_id, None)
+        if prepared is not None:
+            loaders = prepared["loaders"]
+            data_metadata = prepared["data_metadata"]
+            full_panel = prepared["full_panel"]
+            epoch_panel = prepared["epoch_panel"]
+        else:
+            # Adapter and age-conditioner weights are random; reset before
+            # model construction so each single-case run starts from its seed.
+            set_seed(
+                config["training"]["seed"],
+                deterministic=config["training"]["deterministic"],
             )
-            persist_fixed_evaluation_panel(full_panel, shared_panel_path)
-            epoch_panel = full_panel[: min(len(full_panel), int(epoch_eval_size))]
+            loaders, data_metadata = _case_data_loaders(config, dataset_root, kaggle_path)
+            full_panel = epoch_panel = None
+            if evaluate_each_epoch or evaluate_final:
+                full_panel = build_fixed_evaluation_panel(
+                    loaders["val"], size=final_eval_size, explicit_pairs=explicit_pairs
+                )
+                persist_fixed_evaluation_panel(full_panel, shared_panel_path)
+                epoch_panel = full_panel[: min(len(full_panel), int(epoch_eval_size))]
 
         model_config = dict(config["model"])
         auxiliary_name = model_config.pop("auxiliary_dtype")
@@ -376,8 +711,15 @@ def ablation_studies(
                 checkpoint_dir / "latest" / "training_resume.pt"
                 if resume is True else Path(resume)
             )
-            if not Path(resume_from).is_file():
-                raise FileNotFoundError(f"Resume checkpoint not found: {resume_from}")
+
+        steps_per_epoch = estimate_optimizer_steps(
+            len(loaders["train"]), config["training"]["grad_accum_steps"]
+        )
+        total_epochs = (
+            math.ceil(int(config["training"]["max_train_steps"]) / steps_per_epoch)
+            if config["training"]["max_train_steps"] is not None
+            else int(config["training"]["num_epochs"])
+        )
 
         train_options = dict(config["training"])
         train_options.update({
@@ -397,7 +739,7 @@ def ablation_studies(
             "monitor": "val/loss_total",
             "monitor_mode": "min",
             "save_epoch_checkpoints": True,
-            "max_epoch_checkpoints": 10,
+            "max_epoch_checkpoints": max(1, total_epochs),
             "sample_every_epochs": 1 if monitoring_image is not None else 0,
             "monitoring_dir": case_dir / "monitoring",
             "monitoring_image": monitoring_image,
@@ -426,6 +768,7 @@ def ablation_studies(
             val_loader=loaders["val"],
             **train_options,
         )
+        top_epochs = _top_validation_epochs(training_state, Path(checkpoint_dir))
         final_report = final_evaluator.evaluate_final(bundle=bundle) if final_evaluator else None
         metadata = {
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -439,6 +782,7 @@ def ablation_studies(
             "evaluation_models": (metrics_bundle or {}).get("metadata", {}),
             "fixed_panel": str(shared_panel_path) if full_panel is not None else None,
             "data_summary": data_metadata,
+            "top_validation_epochs": top_epochs,
         }
         _write_json(case_dir / "run_metadata.json", metadata)
         reports[case_id] = {
@@ -451,6 +795,7 @@ def ablation_studies(
                 "best_metric": training_state.get("best_metric"),
                 "global_step": training_state.get("global_step"),
                 "optimizer_step": training_state.get("optimizer_step"),
+                "top_epochs": top_epochs,
             },
             "final_evaluation": final_report,
         }
@@ -458,4 +803,16 @@ def ablation_studies(
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+    print("\nTop 3 epochs per ablation by lowest val/loss_total:")
+    for case_id, report in reports.items():
+        print(f"  Case {case_id}: {report['case']['slug']}")
+        if not report["training"]["top_epochs"]:
+            print("    No validation-ranked epoch checkpoints were produced.")
+            continue
+        for entry in report["training"]["top_epochs"]:
+            print(
+                f"    #{entry['rank']} epoch {entry['epoch']:03d} | "
+                f"val/loss_total={entry['validation_loss']:.6f} | "
+                f"{entry['checkpoint_path']}"
+            )
     return reports

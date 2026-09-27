@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
@@ -263,6 +265,22 @@ def test_manifest_rejects_missing_required_columns(tmp_path):
         evaluate_aging_outputs(
             pd.DataFrame([{"sample_id": "x"}]), metrics_bundle=_bundle(), output_dir=tmp_path
         )
+
+
+def test_dex_reports_opencv_compatibility_error_when_caffe_reader_is_missing(
+    monkeypatch, tmp_path
+):
+    from src.quantitative_metrics.backends import DexAgeEstimator
+
+    prototxt = tmp_path / "age.prototxt"
+    checkpoint = tmp_path / "age.caffemodel"
+    prototxt.write_text("name: 'age'", encoding="utf-8")
+    checkpoint.write_bytes(b"checkpoint")
+    fake_cv2 = SimpleNamespace(__version__="5.0.0", dnn=SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "cv2", fake_cv2)
+
+    with pytest.raises(RuntimeError, match="OpenCV 4.*readNetFromCaffe"):
+        DexAgeEstimator(prototxt, checkpoint, device="cpu")
 
 
 def test_disabled_kid_does_not_require_kid_backend(tmp_path):
