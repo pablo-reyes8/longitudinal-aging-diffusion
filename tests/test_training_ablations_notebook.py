@@ -11,6 +11,8 @@ def test_training_ablation_notebook_is_a_thin_public_api_example():
         "".join(cell.get("source", [])) for cell in notebook["cells"]
     )
     assert "from src.ablation_studies import ablation_studies" in source
+    assert "from src.quantitative_metrics import prepare_metrics_config" in source
+    assert "METRICS_CONFIG = prepare_metrics_config({" in source
     assert "case=[0, 1, 2, 3, 4, 5]" in source
     assert "evaluation_source_image" in source and "evaluation_target_image" in source
     assert "adaface_checkpoint_path" in source and "dex_checkpoint_path" in source
