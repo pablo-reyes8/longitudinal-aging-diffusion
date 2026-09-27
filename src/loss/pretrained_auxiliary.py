@@ -165,26 +165,92 @@ def _load_mivolo(
 def _patch_mivolo_timm_compatibility() -> None:
     """Bridge MiVOLO's legacy private timm import to current timm releases.
 
-    MiVOLO imports ``remap_checkpoint(model, state_dict)`` from timm.  Newer
-    timm releases renamed it to ``remap_state_dict(state_dict, model)`` while
-    py-feat requires those newer releases.  The adapter preserves the old
-    argument order and delegates to the maintained implementation.
+    MiVOLO imports private helpers from timm locations that changed over time:
+    ``remap_checkpoint(model, state_dict)`` became
+    ``remap_state_dict(state_dict, model)``, and ``split_model_name_tag`` moved
+    from ``_pretrained`` to ``_registry``.  The adapters preserve MiVOLO's old
+    imports while delegating to the maintained implementations.
     """
+    import inspect
+
     import timm.models._helpers as helpers
+    import timm.models._pretrained as pretrained
+    import timm.models._registry as registry
+    import timm.models.volo as volo
 
-    if hasattr(helpers, "remap_checkpoint"):
+    if not hasattr(helpers, "remap_checkpoint"):
+        remap_state_dict = getattr(helpers, "remap_state_dict", None)
+        if remap_state_dict is None:
+            raise ImportError(
+                "Installed timm is incompatible with MiVOLO: neither remap_checkpoint "
+                "nor remap_state_dict is available"
+            )
+
+        def remap_checkpoint(model, state_dict):
+            return remap_state_dict(state_dict, model)
+
+        helpers.remap_checkpoint = remap_checkpoint
+
+    # MiVOLO imports this registry helper from the old _pretrained module.
+    # Current timm keeps it in _registry instead.
+    if not hasattr(pretrained, "split_model_name_tag"):
+        split_model_name_tag = getattr(registry, "split_model_name_tag", None)
+        if split_model_name_tag is None:
+            raise ImportError(
+                "Installed timm is incompatible with MiVOLO: split_model_name_tag "
+                "is unavailable"
+            )
+        pretrained.split_model_name_tag = split_model_name_tag
+
+    # timm added ``pos_drop_rate`` in the middle of VOLO's constructor after
+    # MiVOLO's subclass was published.  MiVOLO calls this constructor with the
+    # old positional layout, so translate that one legacy call shape.
+    if getattr(volo.VOLO, "_face_aging_mivolo_compat", False):
         return
-    remap_state_dict = getattr(helpers, "remap_state_dict", None)
-    if remap_state_dict is None:
-        raise ImportError(
-            "Installed timm is incompatible with MiVOLO: neither remap_checkpoint "
-            "nor remap_state_dict is available"
+    parameters = inspect.signature(volo.VOLO.__init__).parameters
+    if "pos_drop_rate" not in parameters:
+        return
+    original_init = volo.VOLO.__init__
+
+    def compat_init(self, *args, **kwargs):
+        is_legacy_mivolo_call = (
+            len(args) == 21
+            and callable(args[16])
+            and isinstance(args[17], tuple)
+            and isinstance(args[18], bool)
+            and isinstance(args[19], bool)
         )
+        if is_legacy_mivolo_call and "pos_drop_rate" not in kwargs:
+            return original_init(
+                self,
+                layers=args[0],
+                img_size=args[1],
+                in_chans=args[2],
+                num_classes=args[3],
+                global_pool=args[4],
+                patch_size=args[5],
+                stem_hidden_dim=args[6],
+                embed_dims=args[7],
+                num_heads=args[8],
+                downsamples=args[9],
+                outlook_attention=args[10],
+                mlp_ratio=args[11],
+                qkv_bias=args[12],
+                drop_rate=args[13],
+                pos_drop_rate=0.0,
+                attn_drop_rate=args[14],
+                drop_path_rate=args[15],
+                norm_layer=args[16],
+                post_layers=args[17],
+                use_aux_head=args[18],
+                use_mix_token=args[19],
+                pooling_scale=args[20],
+                **kwargs,
+            )
+        return original_init(self, *args, **kwargs)
 
-    def remap_checkpoint(model, state_dict):
-        return remap_state_dict(state_dict, model)
-
-    helpers.remap_checkpoint = remap_checkpoint
+    volo.VOLO.__init__ = compat_init
+    volo.VOLO._face_aging_mivolo_compat = True
 
 
 def load_pretrained_auxiliary_models(
