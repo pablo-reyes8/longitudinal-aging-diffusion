@@ -164,9 +164,42 @@ def _load_metrics(metrics_config: Mapping[str, Any] | None):
     return bundle, evaluation
 
 
-def _case_data_loaders(config, dataset_root, kaggle_path):
+def _validate_metrics_bundle(bundle: Mapping[str, Any]) -> None:
+    required = ("aligner", "identity_encoder", "age_estimator", "kid_metric")
+    missing = [name for name in required if bundle.get(name) is None]
+    if missing:
+        raise RuntimeError(
+            "Metric bundle is incomplete; missing: " + ", ".join(missing)
+        )
+    identity = bundle["identity_encoder"]
+    age = bundle["age_estimator"]
+    kid = bundle["kid_metric"]
+    if getattr(identity, "model", None) is None:
+        raise RuntimeError("AdaFace metric model was not initialized")
+    if getattr(age, "net", None) is None:
+        raise RuntimeError("DEX metric model was not initialized")
+    identity_device = getattr(identity, "device", torch.device("cpu"))
+    kid_device = getattr(kid, "device", torch.device("cpu"))
+    if torch.device(identity_device).type != "cpu" or torch.device(kid_device).type != "cpu":
+        raise RuntimeError(
+            "Metric evaluators must stay on CPU; set metrics_config['device'] = 'cpu'"
+        )
+    kid_weights = getattr(kid, "inception_weights_path", None)
+    if kid_weights is not None and not Path(kid_weights).is_file():
+        raise FileNotFoundError(f"KID Inception weights not found: {kid_weights}")
+    print(
+        "[metrics] AdaFace, DEX and KID ready "
+        f"(device={getattr(identity, 'device', 'cpu')})"
+    )
+
+
+def _case_data_loaders(
+    config, dataset_root, kaggle_path, *, persistent_workers: bool | None = None
+):
     data_config = dict(config["data"])
     data_config["seed"] = config["training"]["seed"]
+    if persistent_workers is not None:
+        data_config["persistent_workers"] = bool(persistent_workers)
     if data_config["include_kaggle"]:
         if kaggle_path is None:
             raise ValueError("Canonical ablation data uses FG-NET; provide kaggle_path")
@@ -177,10 +210,7 @@ def _case_data_loaders(config, dataset_root, kaggle_path):
 def _loader_batch_preserving_state(loader):
     generator = getattr(loader, "generator", None)
     generator_state = generator.get_state() if generator is not None else None
-    persistent_workers = getattr(loader, "persistent_workers", False)
     iterator = None
-    if persistent_workers:
-        loader.persistent_workers = False
     try:
         iterator = iter(loader)
         batch = next(iterator, None)
@@ -189,14 +219,13 @@ def _loader_batch_preserving_state(loader):
         return batch
     finally:
         if iterator is not None:
-            shutdown = getattr(iterator, "_shutdown_workers", None)
-            if shutdown is not None:
-                shutdown()
+            if not getattr(loader, "persistent_workers", False):
+                shutdown = getattr(iterator, "_shutdown_workers", None)
+                if shutdown is not None:
+                    shutdown()
             del iterator
         if generator is not None and generator_state is not None:
             generator.set_state(generator_state)
-        if persistent_workers:
-            loader.persistent_workers = True
 
 
 def _validate_batch_finite(batch, *, image_size: int) -> int:
@@ -363,7 +392,12 @@ def _preflight_cases(
         config = configs[case_id]
         try:
             set_seed(config["training"]["seed"], deterministic=config["training"]["deterministic"])
-            loaders, data_metadata = _case_data_loaders(config, dataset_root, kaggle_path)
+            # Preflight loaders are disposable. Keeping persistent workers out
+            # avoids mutating an initialized DataLoader and lets training build
+            # its own fresh worker pool afterward.
+            loaders, data_metadata = _case_data_loaders(
+                config, dataset_root, kaggle_path, persistent_workers=False
+            )
             full_panel = epoch_panel = None
             if evaluate_each_epoch or evaluate_final:
                 full_panel = build_fixed_evaluation_panel(
@@ -384,11 +418,12 @@ def _preflight_cases(
                 revision=revision,
             )
             prepared[case_id] = {
-                "loaders": loaders,
                 "data_metadata": data_metadata,
                 "full_panel": full_panel,
                 "epoch_panel": epoch_panel,
             }
+            del loaders
+            gc.collect()
             print(f"[preflight {case_id}] OK: setup and one-microbatch forward/loss ready")
         except Exception as exc:
             prepared.clear()
@@ -497,6 +532,7 @@ def ablation_studies(
     metrics_bundle = evaluation_options = None
     if evaluate_each_epoch or evaluate_final:
         metrics_bundle, evaluation_options = _load_metrics(metrics_config)
+        _validate_metrics_bundle(metrics_bundle)
 
     high_level = {
         "training": {
@@ -625,19 +661,19 @@ def ablation_studies(
         )
 
         prepared = prepared_cases.pop(case_id, None)
+        # Adapter and age-conditioner weights are random; reset before model
+        # construction so every case starts from its scientific seed. The
+        # multi-case preflight loaders were disposable, so use fresh loaders
+        # for the actual training process.
+        set_seed(
+            config["training"]["seed"],
+            deterministic=config["training"]["deterministic"],
+        )
+        loaders, data_metadata = _case_data_loaders(config, dataset_root, kaggle_path)
         if prepared is not None:
-            loaders = prepared["loaders"]
-            data_metadata = prepared["data_metadata"]
             full_panel = prepared["full_panel"]
             epoch_panel = prepared["epoch_panel"]
         else:
-            # Adapter and age-conditioner weights are random; reset before
-            # model construction so each single-case run starts from its seed.
-            set_seed(
-                config["training"]["seed"],
-                deterministic=config["training"]["deterministic"],
-            )
-            loaders, data_metadata = _case_data_loaders(config, dataset_root, kaggle_path)
             full_panel = epoch_panel = None
             if evaluate_each_epoch or evaluate_final:
                 full_panel = build_fixed_evaluation_panel(
