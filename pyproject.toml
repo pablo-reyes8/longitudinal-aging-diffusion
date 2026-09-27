@@ -51,6 +51,12 @@ comparison = [
   "GitPython>=3.1,<4",
   "ffmpy>=0.4,<1",
 ]
+evaluation = [
+  "opencv-python-headless>=4.8,<5",
+  "torchmetrics>=1.4,<2",
+  "torch-fidelity>=0.3,<1",
+  "requests>=2.31,<3",
+]
 dev = [
   "pytest>=8,<9",
   "pytest-cov>=5,<7",

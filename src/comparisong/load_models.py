@@ -131,6 +131,10 @@ def load_aging_models(
     # IMPORTANT:
     # default False because dependencies are enormous (~tens GB).
     download_cradle=False,
+
+    # Independent paper metrics (AdaFace + DEX + lazy KID).
+    load_metrics=False,
+    metrics_config=None,
 ):
     """
     Prepare face-aging baselines.
@@ -202,6 +206,7 @@ def load_aging_models(
         "CUSP": None,
         "HRFAE": None,
         "Cradle2Cane": None,
+        "quantitative_metrics": None,
 
         # Default benchmark:
         # Cradle2Cane intentionally excluded.
@@ -1255,6 +1260,19 @@ def load_aging_models(
     # ========================================================
 
     bundle = fix_aging_baselines(bundle)
+
+    if load_metrics:
+        if not metrics_config:
+            raise ValueError(
+                "metrics_config is required when load_metrics=True and must contain "
+                "local AdaFace and DEX paths."
+            )
+        from src.quantitative_metrics import load_quantitative_metrics
+
+        metric_options = dict(metrics_config)
+        metric_options.setdefault("local_files_only", True)
+        bundle["quantitative_metrics"] = load_quantitative_metrics(**metric_options)
+
     _clear_vram()
 
     print(

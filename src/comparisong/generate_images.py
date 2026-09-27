@@ -8,6 +8,7 @@ import tempfile
 import subprocess
 import requests
 import numpy as np
+import pandas as pd
 import torch
 from pathlib import Path
 
@@ -404,6 +405,44 @@ def _run_verbose(
     return proc
 
 
+def build_comparison_manifest(
+    *,
+    results,
+    source_path,
+    source_age,
+    target_ages,
+    models,
+    output_dir,
+    target_images=None,
+):
+    """Build the shared evaluator manifest without computing any metric."""
+    output_dir = Path(output_dir)
+    target_images = target_images or {}
+    normalized_targets = {int(age): value for age, value in target_images.items()}
+    rows = []
+    for model_name in models:
+        model_name = str(model_name)
+        model_results = results.get(model_name, {})
+        for age in target_ages:
+            age = int(age)
+            generated_path = output_dir / model_name / f"age_{age:03d}.png"
+            generated_available = age in model_results and generated_path.is_file()
+            target_reference = normalized_targets.get(age)
+            rows.append(
+                {
+                    "sample_id": f"age-{age:03d}",
+                    "source_path": str(source_path),
+                    "target_path": None if target_reference is None else str(target_reference),
+                    "generated_path": str(generated_path) if generated_available else None,
+                    "source_age": int(source_age),
+                    "target_age": age,
+                    "delta_age": age - int(source_age),
+                    "model_name": model_name,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 # ============================================================
 # MAIN INFERENCE FUNCTION
 # ============================================================
@@ -419,6 +458,10 @@ def age_image(
     show=True,
     output_dir="/content/aging_outputs",
     strict=False,
+    metrics=False,
+    target_images=None,
+    metrics_output_dir=None,
+    evaluation_config=None,
 ):
     """
     Generate face-aging sweeps sequentially.
@@ -484,6 +527,12 @@ def age_image(
     device = bundle[
         "device"
     ]
+
+    if metrics and bundle.get("quantitative_metrics") is None:
+        raise ValueError(
+            "metrics=True requires bundle['quantitative_metrics']; call "
+            "load_aging_models(..., load_metrics=True, metrics_config=...)."
+        )
 
     if models is None:
 
@@ -2182,5 +2231,32 @@ def age_image(
     print(
         output_dir
     )
+
+    if metrics:
+        from src.quantitative_metrics import evaluate_aging_outputs
+
+        manifest = build_comparison_manifest(
+            results=results,
+            source_path=Path(output_dir) / "source.png",
+            source_age=source_age,
+            target_ages=target_ages,
+            models=models,
+            output_dir=output_dir,
+            target_images=target_images,
+        )
+        if manifest.empty:
+            results["metrics"] = {
+                "status": "no_requested_models",
+                "manifest": manifest,
+            }
+        else:
+            metric_dir = Path(metrics_output_dir or Path(output_dir) / "metrics")
+            options = dict(evaluation_config or {})
+            results["metrics"] = evaluate_aging_outputs(
+                manifest,
+                metrics_bundle=bundle["quantitative_metrics"],
+                output_dir=metric_dir,
+                **options,
+            )
 
     return results
