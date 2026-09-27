@@ -59,9 +59,9 @@ Activate the existing environment and install the project in editable mode:
 ```bash
 conda activate deep_learning
 python -m pip install -e ".[auxiliary,dev,notebooks]"
-# Install MiVOLO separately without dependencies because its old timm pin
-# conflicts with the timm version required by py-feat:
-python -m pip install --no-deps "git+https://github.com/WildChlamydia/MiVOLO.git@main"
+# Install the reviewed MiVOLO snapshot separately without dependencies because
+# its old timm pin conflicts with the timm version required by py-feat:
+python -m pip install --no-deps "git+https://github.com/WildChlamydia/MiVOLO.git@37475e3f8818b5f22448003feec3e64b01bfb188"
 ```
 
 The ArcFace auxiliary extra requires Python 3.11 or newer. Core data, model,

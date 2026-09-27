@@ -13,6 +13,10 @@ from .auxiliary_adapters import AgeEstimatorAdapter, IdentityEncoderAdapter
 
 IDENTITY_MODEL_ID = "py-feat/arcface_r50"
 AGE_MODEL_ID = "iitolstykh/mivolo_v2"
+# Immutable Hugging Face snapshot.  The model repository uses remote code;
+# keeping this revision fixed prevents a later code upload from silently
+# changing the executable model implementation.
+AGE_MODEL_REVISION = "53393526c220e34cdd7b722b36d22b6f9e5f4241"
 DEFAULT_IDENTITY_MODEL_ID = IDENTITY_MODEL_ID
 DEFAULT_AGE_MODEL_ID = AGE_MODEL_ID
 
@@ -145,15 +149,42 @@ def _load_mivolo(
         from transformers import AutoModelForImageClassification
     except ImportError as exc:
         raise ImportError("MiVOLO loading requires transformers and the optional mivolo package") from exc
+    _patch_mivolo_timm_compatibility()
+    resolved_revision = revision or AGE_MODEL_REVISION
     return AutoModelForImageClassification.from_pretrained(
         model_id,
-        revision=revision,
+        revision=resolved_revision,
         token=token,
         cache_dir=cache_dir,
         local_files_only=local_files_only,
         trust_remote_code=True,
         torch_dtype=dtype,
     )
+
+
+def _patch_mivolo_timm_compatibility() -> None:
+    """Bridge MiVOLO's legacy private timm import to current timm releases.
+
+    MiVOLO imports ``remap_checkpoint(model, state_dict)`` from timm.  Newer
+    timm releases renamed it to ``remap_state_dict(state_dict, model)`` while
+    py-feat requires those newer releases.  The adapter preserves the old
+    argument order and delegates to the maintained implementation.
+    """
+    import timm.models._helpers as helpers
+
+    if hasattr(helpers, "remap_checkpoint"):
+        return
+    remap_state_dict = getattr(helpers, "remap_state_dict", None)
+    if remap_state_dict is None:
+        raise ImportError(
+            "Installed timm is incompatible with MiVOLO: neither remap_checkpoint "
+            "nor remap_state_dict is available"
+        )
+
+    def remap_checkpoint(model, state_dict):
+        return remap_state_dict(state_dict, model)
+
+    helpers.remap_checkpoint = remap_checkpoint
 
 
 def load_pretrained_auxiliary_models(
