@@ -224,6 +224,7 @@ def configure_face_aging_trainable_parameters(
     unet: nn.Module,
     *,
     trainable_dtype: torch.dtype = torch.float32,
+    require_adapter: bool = True,
 ) -> tuple[list[nn.Parameter], list[str]]:
     """Freeze everything except adapter tensors and the expanded ``conv_in``."""
     freeze_module(vae)
@@ -245,7 +246,7 @@ def configure_face_aging_trainable_parameters(
             parameters.append(parameter)
     if not names or not any(name.startswith("conv_in.") for name in names):
         raise RuntimeError("Trainable policy failed to include conv_in")
-    if not any("lora_" in name or name.endswith("magnitude") for name in names):
+    if require_adapter and not any("lora_" in name or name.endswith("magnitude") for name in names):
         raise RuntimeError("Trainable policy found no adapter parameters")
     return parameters, names
 
@@ -282,8 +283,8 @@ def assemble_face_aging_diffusion_bundle(
     if source_conditioning != "concat":
         raise ValueError("V1 only supports source_conditioning='concat'")
     adapter_type = adapter_type.lower().strip()
-    if adapter_type not in {"lora", "dora"}:
-        raise ValueError("adapter_type must be 'lora' or 'dora'")
+    if adapter_type not in {"lora", "dora", "none"}:
+        raise ValueError("adapter_type must be 'lora', 'dora', or 'none'")
     if age_conditioning_mode != "delta_mlp":
         raise ValueError("V1 supports age_conditioning_mode='delta_mlp'")
     resolved_age_version = age_conditioning_version or (
@@ -297,18 +298,29 @@ def assemble_face_aging_diffusion_bundle(
         )
     unet = components["unet"]
     conv_report = expand_unet_conv_in_for_source_conditioning(unet)
-    injection = inject_manual_lora_unet if adapter_type == "lora" else inject_manual_dora_unet
-    injection(
-        unet,
-        rank=rank,
-        alpha=alpha,
-        dropout=dropout,
-        target_suffixes=tuple(target_modules),
-        require_all_targets=True,
-        verbose=verbose,
-    )
+    if adapter_type == "none":
+        unet._face_aging_adapter_report = {
+            "adapter_type": "none",
+            "wrapped_module_names": [],
+            "counts_by_target": {target: 0 for target in target_modules},
+            "target_modules": list(target_modules),
+            "expected_adapter_parameters": 0,
+        }
+    else:
+        injection = inject_manual_lora_unet if adapter_type == "lora" else inject_manual_dora_unet
+        injection(
+            unet,
+            rank=rank,
+            alpha=alpha,
+            dropout=dropout,
+            target_suffixes=tuple(target_modules),
+            require_all_targets=True,
+            verbose=verbose,
+        )
     trainable_params, trainable_names = configure_face_aging_trainable_parameters(
-        components["vae"], components["text_encoder"], unet, trainable_dtype=trainable_dtype
+        components["vae"], components["text_encoder"], unet,
+        trainable_dtype=trainable_dtype,
+        require_adapter=adapter_type != "none",
     )
     age_conditioner = None
     age_conditioning_config = None
@@ -586,28 +598,33 @@ def build_face_aging_optimizer(
         and not name.startswith("age_delta_conditioner.")
         and not name.startswith("age_conditioner.")
     ]
-    if not conv or not adapters:
-        raise RuntimeError(f"Expected both adapter and conv_in parameter groups; conv={len(conv)}, adapters={len(adapters)}")
+    if not conv:
+        raise RuntimeError("Expected a non-empty conv_in parameter group")
+    expects_adapter = str(bundle.get("adapter_type", "lora")).lower() != "none"
+    if expects_adapter and not adapters:
+        raise RuntimeError("Adapter training is enabled but has no optimizer parameters")
+    if not expects_adapter and adapters:
+        raise RuntimeError("adapter_type='none' must not expose adapter optimizer parameters")
     if bundle.get("use_age_delta_conditioning", False) and not age_conditioner:
         raise RuntimeError("Age-delta conditioning is enabled but has no optimizer parameters")
     all_ids = [id(parameter) for _, parameter in conv + adapters + age_conditioner]
     if len(all_ids) != len(set(all_ids)):
         raise RuntimeError("A trainable parameter appears in more than one optimizer group")
     conv_decay = weight_decay if conv_in_weight_decay is None else conv_in_weight_decay
-    groups = [
-        {
+    groups = []
+    if adapters:
+        groups.append({
             "params": [parameter for _, parameter in adapters],
             "lr": lr_lora,
             "weight_decay": weight_decay,
             "group_name": "adapter",
-        },
-        {
+        })
+    groups.append({
             "params": [parameter for _, parameter in conv],
             "lr": lr_conv_in,
             "weight_decay": conv_decay,
             "group_name": "conv_in",
-        },
-    ]
+        })
     if age_conditioner:
         groups.append({
             "params": [parameter for _, parameter in age_conditioner],

@@ -104,6 +104,33 @@ def test_bundle_trainable_policy_and_optimizer_groups(adapter_type):
     assert [group["lr"] for group in optimizer.param_groups] == [1e-4, 2e-5, 1e-4]
 
 
+def test_no_adapter_bundle_trains_only_conv_and_age_conditioner_without_fake_group():
+    bundle = assemble_face_aging_diffusion_bundle(
+        make_fake_components(), model_id="fake/sd15", adapter_type="none",
+        rank=16, alpha=16, verbose=False,
+    )
+
+    names = bundle["trainable_param_names"]
+    assert bundle["adapter_type"] == "none"
+    assert bundle["adapter_report"]["expected_adapter_parameters"] == 0
+    assert any(name.startswith("conv_in.") for name in names)
+    assert any(name.startswith("age_conditioner.") for name in names)
+    assert not any("lora_" in name or name.endswith(".magnitude") for name in names)
+    assert not any(
+        parameter.requires_grad
+        for name, parameter in bundle["unet"].named_parameters()
+        if ".attn" in name or ".to_" in name
+    )
+
+    optimizer = build_face_aging_optimizer(
+        bundle, lr_lora=1e-4, lr_conv_in=2e-5, lr_age_conditioner=3e-4,
+    )
+    assert [group["group_name"] for group in optimizer.param_groups] == [
+        "conv_in", "age_conditioner"
+    ]
+    assert [group["lr"] for group in optimizer.param_groups] == [2e-5, 3e-4]
+
+
 def test_adapter_target_failure_is_loud():
     with pytest.raises(RuntimeError, match="coverage failed"):
         inject_manual_lora_unet(FakeUNet(), target_suffixes=("does_not_exist",), verbose=False)

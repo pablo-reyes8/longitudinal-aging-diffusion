@@ -11,6 +11,46 @@ from src.training import TRAIN_AGGING_MODEL
 from training_fakes import clone_module_parameters, make_training_bundle, make_training_loss
 
 
+def test_epoch_end_callback_runs_after_validation_and_is_saved_in_history(tiny_root):
+    loaders, _ = build_face_aging_dataloaders(
+        tiny_root, image_size=32, batch_size=2, num_workers=0,
+        train_drop_last=False, train_shuffle=False,
+    )
+    bundle = make_training_bundle(seed=989)
+    seen = []
+
+    def callback(**context):
+        seen.append(context)
+        assert context["val_result"] is not None
+        assert context["sampling_report"] is None
+        return {"status": "evaluated", "epoch": context["epoch"] + 1}
+
+    result = TRAIN_AGGING_MODEL(
+        bundle=bundle,
+        loss_fn=make_training_loss(bundle),
+        train_loader=loaders["train"],
+        val_loader=loaders["val"],
+        num_epochs=1,
+        max_train_steps=1,
+        grad_accum_steps=1,
+        max_train_batches=1,
+        max_val_batches=1,
+        amp_enabled=False,
+        device="cpu",
+        gradient_checkpointing=False,
+        enable_xformers=False,
+        sample_every_epochs=0,
+        log_every=0,
+        epoch_end_callback=callback,
+    )
+
+    assert len(seen) == 1
+    assert seen[0]["bundle"] is bundle
+    assert result["history"]["epochs"][0]["epoch_evaluation"] == {
+        "status": "evaluated", "epoch": 1,
+    }
+
+
 def test_train_agging_model_real_loader_mixed_precision_checkpoint_and_validation(tiny_root, tiny_fgnet_root, tmp_path):
     loaders, _ = build_face_aging_dataloaders(
         tiny_root, image_size=32, batch_size=2, num_workers=0,

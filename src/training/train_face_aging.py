@@ -219,6 +219,7 @@ def train_model(
     use_ema: bool = False,
     image_size: int | None = 256,
     prompt_configuration: dict | None = None,
+    epoch_end_callback=None,
 ) -> dict[str, Any]:
     """Train the single SD1.5 editing bundle; `max_train_steps` overrides epochs."""
     _validate_config(
@@ -834,6 +835,25 @@ def train_model(
                 atomic_json_save(history, manager.root_dir / "history.json")
             else:
                 epoch_record["calibration_checkpoint"] = None
+            epoch_evaluation = None
+            if epoch_end_callback is not None:
+                epoch_evaluation = epoch_end_callback(
+                    bundle=bundle,
+                    loss_fn=loss_fn,
+                    train_loader=train_loader,
+                    val_loader=val_loader,
+                    epoch=epoch,
+                    device=resolved_device,
+                    global_step=global_step,
+                    optimizer_step=optimizer_step,
+                    train_result=train_result,
+                    val_result=val_result,
+                    checkpoint_report=checkpoint_report,
+                    sampling_report=sampling_report,
+                )
+            epoch_record["epoch_evaluation"] = epoch_evaluation
+            if manager is not None:
+                atomic_json_save(history, manager.root_dir / "history.json")
             validation_value = val_result["metrics"].get("val/loss_total") if val_result else None
             validation_text = f"{validation_value:.4f}" if validation_value is not None else "not_run"
             epoch_duration = float(epoch_record["duration_seconds"])
