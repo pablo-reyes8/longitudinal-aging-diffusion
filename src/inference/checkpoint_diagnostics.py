@@ -573,6 +573,15 @@ def diagnose_checkpoint_adaptive_age_sweep(
             "assisted": assisted_frame,
             "prompt_assistance": prompt_records,
         })
+    # Keep the in-memory candidates available to external evaluation helpers.
+    # The diagnostic CSVs remain the portable audit artifact; these attrs avoid
+    # rerunning diffusion merely to score the selected image.
+    frame.attrs.update({
+        "base_results": sweep["results"],
+        "assisted_results": (
+            assisted_sweep["results"] if assisted_sweep is not None else []
+        ),
+    })
     return frame
 
 

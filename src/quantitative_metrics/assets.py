@@ -149,14 +149,21 @@ def _clone_adaface_repository(destination: Path) -> None:
         shutil.rmtree(temporary_root, ignore_errors=True)
 
 
-def prepare_metrics_config(config: Mapping[str, Any]) -> dict[str, Any]:
-    """Download missing evaluator assets and return a runner-ready configuration.
+def prepare_metrics_config(
+    config: Mapping[str, Any], *, include_kid: bool = True
+) -> dict[str, Any]:
+    """Download selected evaluator assets and return a runner-ready configuration.
 
     Models are not imported or loaded here. The returned configuration defaults
-    evaluation to CPU, leaving training VRAM untouched.
+    evaluation to CPU, leaving training VRAM untouched. Set ``include_kid=False``
+    for the AdaFace/DEX-only path.
     """
     prepared = dict(config)
-    required = {"adaface_repo_path", *DOWNLOAD_SPECS}
+    specs = DOWNLOAD_SPECS if include_kid else {
+        key: spec for key, spec in DOWNLOAD_SPECS.items()
+        if key != "kid_inception_weights_path"
+    }
+    required = {"adaface_repo_path", *specs}
     missing = sorted(required.difference(prepared))
     if missing:
         raise ValueError(f"metrics config is missing required path(s): {', '.join(missing)}")
@@ -168,7 +175,7 @@ def prepare_metrics_config(config: Mapping[str, Any]) -> dict[str, Any]:
     else:
         print(f"AdaFace repository ready: {repository}")
 
-    for key, spec in DOWNLOAD_SPECS.items():
+    for key, spec in specs.items():
         _ensure_download(Path(prepared[key]).expanduser(), spec)
 
     prepared.setdefault("device", "cpu")
