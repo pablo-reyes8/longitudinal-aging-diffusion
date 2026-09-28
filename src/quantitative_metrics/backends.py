@@ -180,9 +180,27 @@ class DexAgeEstimator:
             )
         self.cv2 = cv2
         self.net = cv2.dnn.readNetFromCaffe(str(prototxt), str(checkpoint))
-        if device == "cuda":
-            self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
-            self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
+        self._cuda_enabled = False
+        if resolve_torch_device(device).type == "cuda":
+            cuda_count = 0
+            try:
+                cuda_count = int(cv2.cuda.getCudaEnabledDeviceCount())
+            except Exception:
+                pass
+            if cuda_count > 0:
+                try:
+                    self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
+                    self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
+                    self._cuda_enabled = True
+                except Exception:
+                    self._set_cpu_backend()
+            else:
+                self._set_cpu_backend()
+
+    def _set_cpu_backend(self):
+        self.net.setPreferableBackend(self.cv2.dnn.DNN_BACKEND_OPENCV)
+        self.net.setPreferableTarget(self.cv2.dnn.DNN_TARGET_CPU)
+        self._cuda_enabled = False
 
     def predict_batch(self, images):
         arrays = [np.asarray(image.convert("RGB"))[..., ::-1] for image in images]
@@ -190,7 +208,16 @@ class DexAgeEstimator:
             arrays, scalefactor=1.0, size=(224, 224), mean=(104.0, 117.0, 123.0), swapRB=False
         )
         self.net.setInput(blob)
-        return expected_dex_age(self.net.forward())
+        try:
+            output = self.net.forward()
+        except Exception:
+            # Some OpenCV builds report CUDA availability but still reject the
+            # CUDA target at forward time. Retry once on the portable CPU path.
+            if not self._cuda_enabled:
+                raise
+            self._set_cpu_backend()
+            output = self.net.forward()
+        return expected_dex_age(output)
 
 
 class MetricIdentityDiagnosticAdapter:

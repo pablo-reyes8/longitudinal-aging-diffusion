@@ -283,6 +283,44 @@ def test_dex_reports_opencv_compatibility_error_when_caffe_reader_is_missing(
         DexAgeEstimator(prototxt, checkpoint, device="cpu")
 
 
+def test_dex_falls_back_to_cpu_when_opencv_has_no_cuda(monkeypatch, tmp_path):
+    from src.quantitative_metrics.backends import DexAgeEstimator
+
+    prototxt = tmp_path / "age.prototxt"
+    checkpoint = tmp_path / "age.caffemodel"
+    prototxt.write_text("name: 'age'", encoding="utf-8")
+    checkpoint.write_bytes(b"checkpoint")
+
+    class FakeNet:
+        def __init__(self):
+            self.preferences = []
+
+        def setPreferableBackend(self, value):
+            self.preferences.append(("backend", value))
+
+        def setPreferableTarget(self, value):
+            self.preferences.append(("target", value))
+
+    net = FakeNet()
+    fake_dnn = SimpleNamespace(
+        DNN_BACKEND_CUDA=1,
+        DNN_TARGET_CUDA=2,
+        DNN_BACKEND_OPENCV=3,
+        DNN_TARGET_CPU=4,
+        readNetFromCaffe=lambda *_: net,
+    )
+    fake_cv2 = SimpleNamespace(
+        __version__="4.14.0",
+        dnn=fake_dnn,
+        cuda=SimpleNamespace(getCudaEnabledDeviceCount=lambda: 0),
+    )
+    monkeypatch.setitem(sys.modules, "cv2", fake_cv2)
+
+    DexAgeEstimator(prototxt, checkpoint, device="cuda")
+
+    assert net.preferences == [("backend", 3), ("target", 4)]
+
+
 def test_disabled_kid_does_not_require_kid_backend(tmp_path):
     from src.quantitative_metrics import evaluate_aging_outputs
 

@@ -34,3 +34,8 @@ def test_ablation_master_runs_baseline_phase_before_ablations():
     source = _source("output/abliations/Abliations_metrics_paper.ipynb")
     assert "baseline_first=True" in source
     assert "all_manifests.extend(_run_baseline_phase" in source
+
+
+def test_ablation_comparison_keeps_metric_backends_on_cpu():
+    source = _source("output/abliations/Abliations_metrics_paper.ipynb")
+    assert 'device="cpu"' in source
