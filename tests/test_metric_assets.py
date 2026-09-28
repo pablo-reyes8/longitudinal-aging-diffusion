@@ -143,3 +143,60 @@ def test_prepare_metrics_config_clones_missing_adaface_repository(monkeypatch, t
     assert (Path(prepared["adaface_repo_path"]) / "net.py").is_file()
     assert prepared["device"] == "cpu"
     assert prepared["local_files_only"] is True
+
+
+def test_adaface_gdrive_quota_falls_back_to_pinned_huggingface_copy(monkeypatch, tmp_path):
+    import src.quantitative_metrics.assets as assets
+
+    class FileURLRetrievalError(RuntimeError):
+        pass
+
+    target = tmp_path / "adaface.ckpt"
+    spec = assets.DownloadSpec(
+        google_drive_id="blocked",
+        hf_repo_id="mirror/AdaFace",
+        hf_filename="adaface_ir101_webface12m.ckpt",
+        hf_revision="abc123",
+        min_bytes=4,
+        exact_bytes=4,
+    )
+    calls = {}
+
+    def fail_gdrive(*args, **kwargs):
+        raise FileURLRetrievalError("Too many users")
+
+    def fake_huggingface(spec_arg, destination):
+        calls["spec"] = spec_arg
+        destination.write_bytes(b"good")
+
+    monkeypatch.setattr(assets, "_download_google_drive", fail_gdrive)
+    monkeypatch.setattr(assets, "_download_huggingface", fake_huggingface)
+
+    assets._ensure_download(target, spec)
+
+    assert target.read_bytes() == b"good"
+    assert calls["spec"].hf_repo_id == "mirror/AdaFace"
+
+
+def test_adaface_fallback_does_not_hide_non_retrieval_errors(monkeypatch, tmp_path):
+    import src.quantitative_metrics.assets as assets
+
+    spec = assets.DownloadSpec(
+        google_drive_id="blocked",
+        hf_repo_id="mirror/AdaFace",
+        hf_filename="adaface.ckpt",
+        min_bytes=1,
+    )
+    monkeypatch.setattr(
+        assets,
+        "_download_google_drive",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("network down")),
+    )
+    monkeypatch.setattr(
+        assets,
+        "_download_huggingface",
+        lambda *args, **kwargs: pytest.fail("fallback should not run"),
+    )
+
+    with pytest.raises(RuntimeError, match="network down"):
+        assets._ensure_download(tmp_path / "adaface.ckpt", spec)

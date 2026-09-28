@@ -24,6 +24,9 @@ class DownloadSpec:
     min_bytes: int = 1
     exact_bytes: int | None = None
     sha256: str | None = None
+    hf_repo_id: str | None = None
+    hf_filename: str | None = None
+    hf_revision: str | None = None
 
 
 DOWNLOAD_SPECS = {
@@ -32,6 +35,10 @@ DOWNLOAD_SPECS = {
         min_bytes=100_000_000,
         exact_bytes=1_526_801_999,
         sha256="0e7a3238d2a50f3fe3860782534928ac7cb2598977cf897f6869fd5ac2493fd0",
+        hf_repo_id="VishalMishraTss/AdaFace",
+        hf_filename="adaface_ir101_webface12m.ckpt",
+        # Pin the exact mirror revision; the SHA256 below is still checked.
+        hf_revision="534fa44f9499437645bd18eee376e52fd60bd931",
     ),
     "dex_prototxt_path": DownloadSpec(
         url="https://data.vision.ee.ethz.ch/cvl/rrothe/imdb-wiki/static/age.prototxt",
@@ -93,6 +100,33 @@ def _download_google_drive(file_id: str, destination: Path) -> None:
         raise RuntimeError("gdown did not download the AdaFace checkpoint")
 
 
+def _download_huggingface(spec: DownloadSpec, destination: Path) -> None:
+    """Download a pinned fallback artifact into the atomic temporary path."""
+    if not spec.hf_repo_id or not spec.hf_filename:
+        raise RuntimeError("No Hugging Face fallback is configured for this metric asset")
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as error:
+        raise RuntimeError(
+            "The AdaFace Google Drive download was unavailable and the Hugging Face "
+            "fallback requires huggingface_hub. Install it with `pip install huggingface_hub`."
+        ) from error
+    downloaded = Path(
+        hf_hub_download(
+            repo_id=spec.hf_repo_id,
+            filename=spec.hf_filename,
+            revision=spec.hf_revision,
+        )
+    )
+    if downloaded.resolve() != destination.resolve():
+        shutil.copyfile(downloaded, destination)
+
+
+def _is_file_url_retrieval_error(error: BaseException) -> bool:
+    """Recognize gdown's quota/permission retrieval failure without importing gdown."""
+    return error.__class__.__name__ == "FileURLRetrievalError"
+
+
 def _ensure_download(path: Path, spec: DownloadSpec) -> None:
     if _is_valid_download(path, spec):
         print(f"Metric asset ready: {path}")
@@ -105,7 +139,16 @@ def _ensure_download(path: Path, spec: DownloadSpec) -> None:
     print(f"Downloading metric asset: {path.name}")
     try:
         if spec.google_drive_id is not None:
-            _download_google_drive(spec.google_drive_id, partial)
+            try:
+                _download_google_drive(spec.google_drive_id, partial)
+            except Exception as error:
+                if not (_is_file_url_retrieval_error(error) and spec.hf_repo_id):
+                    raise
+                print(
+                    "Google Drive did not provide the AdaFace checkpoint; "
+                    f"using pinned Hugging Face fallback {spec.hf_repo_id}/{spec.hf_filename}."
+                )
+                _download_huggingface(spec, partial)
         elif spec.url is not None:
             _download_http(spec.url, partial)
         else:
