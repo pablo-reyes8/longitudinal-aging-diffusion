@@ -52,6 +52,7 @@ Thumbs.db
 
 PROJECT_CONTEXT_FOR_AI.md
 output/training_notebooks
-output/comparsing
+output/comparsing/*
+!output/comparsing/results/
+!output/comparsing/results/**
 output/abliations
-
