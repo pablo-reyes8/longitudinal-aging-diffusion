@@ -11,6 +11,26 @@ import numpy as np
 from PIL import Image
 
 
+def _tensor_images_to_pil(images):
+    """Convert a diagnostic BCHW tensor in ``[0, 1]`` to RGB PIL images."""
+    import torch
+
+    if not torch.is_tensor(images):
+        raise TypeError("Diagnostic image batch must be a torch.Tensor")
+    if images.ndim == 3:
+        images = images.unsqueeze(0)
+    if images.ndim != 4 or images.shape[1] != 3:
+        raise ValueError("Diagnostic image batch must have shape [B, 3, H, W]")
+    batch = images.detach().float().cpu().clamp(0, 1)
+    return [
+        Image.fromarray(
+            (sample.permute(1, 2, 0).mul(255).round().byte().numpy()),
+            mode="RGB",
+        )
+        for sample in batch
+    ]
+
+
 def _file_sha256(path: str | Path) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
@@ -171,6 +191,81 @@ class DexAgeEstimator:
         )
         self.net.setInput(blob)
         return expected_dex_age(self.net.forward())
+
+
+class MetricIdentityDiagnosticAdapter:
+    """Torch-callable bridge for the already-loaded AdaFace metric backend.
+
+    Adaptive inference diagnostics expect a frozen ``nn.Module`` that accepts
+    an image tensor.  The quantitative AdaFace backend intentionally exposes a
+    PIL/NumPy API instead, so this bridge keeps the two APIs separate while
+    allowing external checkpoint picking to reuse the metric models.
+    """
+
+    def __new__(cls, metrics_bundle):
+        import torch
+        from torch import nn
+
+        class _Adapter(nn.Module):
+            def __init__(self, bundle):
+                super().__init__()
+                self._metrics_bundle = bundle
+                self.register_buffer("_device_anchor", torch.empty(0), persistent=False)
+
+            def forward(self, images):
+                pil_images = _tensor_images_to_pil(images)
+                aligner = self._metrics_bundle.get("aligner")
+                if aligner is not None:
+                    aligned = [aligner(image) for image in pil_images]
+                    pil_images = [
+                        face if face is not None else image
+                        for face, image in zip(aligned, pil_images)
+                    ]
+                values = self._metrics_bundle["identity_encoder"].embed_batch(pil_images)
+                embeddings = torch.as_tensor(
+                    values, dtype=torch.float32, device=self._device_anchor.device
+                )
+                return embeddings.unsqueeze(0) if embeddings.ndim == 1 else embeddings
+
+        return _Adapter(metrics_bundle)
+
+
+class MetricAgeDiagnosticAdapter:
+    """Torch-callable bridge for the already-loaded DEX metric backend."""
+
+    def __new__(cls, metrics_bundle):
+        import torch
+        from torch import nn
+
+        class _Adapter(nn.Module):
+            def __init__(self, bundle):
+                super().__init__()
+                self._metrics_bundle = bundle
+                self.register_buffer("_device_anchor", torch.empty(0), persistent=False)
+
+            def forward(self, images):
+                values = self._metrics_bundle["age_estimator"].predict_batch(
+                    _tensor_images_to_pil(images)
+                )
+                ages = torch.as_tensor(
+                    values, dtype=torch.float32, device=self._device_anchor.device
+                )
+                return ages.reshape(-1, 1)
+
+        return _Adapter(metrics_bundle)
+
+
+def build_metric_diagnostic_adapters(metrics_bundle):
+    """Build inference-diagnostic adapters from a loaded metric bundle."""
+    missing = sorted({"identity_encoder", "age_estimator"}.difference(metrics_bundle))
+    if missing:
+        raise ValueError(
+            "Metric diagnostic adapters require: " + ", ".join(missing)
+        )
+    return (
+        MetricIdentityDiagnosticAdapter(metrics_bundle),
+        MetricAgeDiagnosticAdapter(metrics_bundle),
+    )
 
 
 class TorchMetricsKid:

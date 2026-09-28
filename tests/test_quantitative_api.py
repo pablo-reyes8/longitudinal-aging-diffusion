@@ -1,8 +1,10 @@
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from PIL import Image
 import pytest
+import torch
 
 
 def test_build_default_metrics_config_uses_cpu_and_stable_layout(tmp_path):
@@ -216,3 +218,29 @@ def test_evaluate_aging_inference_picking_scores_base_and_assisted(tmp_path, mon
     assert result["selected_variants"] == {35.0: "assisted"}
     assert result["manifest"].iloc[0]["selected_variant"] == "assisted"
     assert captured["options"]["compute_kid"] is False
+
+
+def test_metric_backends_can_supply_picking_diagnostics_without_pyfeat():
+    from src.quantitative_metrics.api import _build_metric_diagnostic_adapters
+
+    class FakeAligner:
+        def __call__(self, image):
+            return image
+
+    class FakeIdentity:
+        def embed_batch(self, images):
+            return np.asarray([[1.0, 0.0, 0.0] for _ in images])
+
+    class FakeAge:
+        def predict_batch(self, images):
+            return np.asarray([53.0 for _ in images])
+
+    identity, age = _build_metric_diagnostic_adapters({
+        "aligner": FakeAligner(),
+        "identity_encoder": FakeIdentity(),
+        "age_estimator": FakeAge(),
+    })
+    images = torch.rand(2, 3, 8, 8)
+
+    assert identity(images).shape == (2, 3)
+    assert torch.allclose(age(images), torch.tensor([53.0, 53.0]))

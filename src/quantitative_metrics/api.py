@@ -20,7 +20,7 @@ import pandas as pd
 from PIL import Image
 
 from .assets import prepare_metrics_config
-from .backends import load_quantitative_metrics
+from .backends import build_metric_diagnostic_adapters, load_quantitative_metrics
 from .evaluator import evaluate_aging_outputs
 from .image_io import ImageResolver
 
@@ -276,6 +276,11 @@ def _load_inference_bundle(
     )
 
 
+def _build_metric_diagnostic_adapters(metrics_bundle):
+    """Expose metric-backed diagnostic adapters for external checkpoint picking."""
+    return build_metric_diagnostic_adapters(metrics_bundle)
+
+
 def _evaluate_generated_manifest(
     *,
     manifest: pd.DataFrame,
@@ -449,6 +454,7 @@ def evaluate_aging_inference_picking(
     output_dir: str | Path = "outputs/quantitative_metrics/inference_picking",
     model_name: str = "checkpoint_picked",
     diagnostic_config: Mapping[str, Any] | None = None,
+    diagnostic_backend: str = "metrics",
     evaluation_config: Mapping[str, Any] | None = None,
     device=None,
     dtype=None,
@@ -457,7 +463,14 @@ def evaluate_aging_inference_picking(
     revision: str | None = None,
     download_assets: bool = True,
 ):
-    """Run adaptive diagnostics, select the best base/assisted image per age, and score it."""
+    """Run adaptive diagnostics, select the best base/assisted image per age, and score it.
+
+    ``diagnostic_backend="metrics"`` (the default) reuses the already-loaded
+    AdaFace/DEX metric bundle.  This keeps external checkpoint evaluation
+    independent from the optional training-only ``py-feat``/MiVOLO stack.
+    Set ``diagnostic_backend="auxiliary"`` only when those differentiable
+    auxiliary models are intentionally installed and desired.
+    """
     checkpoint = Path(checkpoint_path).expanduser()
     source = Path(source_image).expanduser()
     if not checkpoint.is_file():
@@ -475,6 +488,8 @@ def evaluate_aging_inference_picking(
         include_kid=False,
         download_assets=download_assets,
     )
+    if diagnostic_backend not in {"metrics", "auxiliary"}:
+        raise ValueError("diagnostic_backend must be 'metrics' or 'auxiliary'")
     bundle, owns_bundle = _load_inference_bundle(
         checkpoint,
         inference_bundle=inference_bundle,
@@ -483,8 +498,15 @@ def evaluate_aging_inference_picking(
         local_files_only=local_files_only,
         token=token,
         revision=revision,
-        load_auxiliary_models=True,
+        load_auxiliary_models=(diagnostic_backend == "auxiliary"),
     )
+    if diagnostic_backend == "metrics":
+        # Adaptive picking only needs frozen age/identity scores.  Reusing the
+        # metric bundle avoids importing py-feat and its incompatible timm pin.
+        if "identity_encoder" in metrics and "age_estimator" in metrics:
+            bundle["identity_encoder"], bundle["age_estimator"] = (
+                _build_metric_diagnostic_adapters(metrics)
+            )
     from src.inference import diagnose_checkpoint_adaptive_age_sweep
 
     options = dict(diagnostic_config or {})
