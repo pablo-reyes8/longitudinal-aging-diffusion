@@ -21,6 +21,18 @@ from src.inference import (
 from training_fakes import make_training_bundle
 
 
+def test_module_device_dtype_supports_frozen_buffer_only_adapters():
+    from src.inference.inference_utils import module_device_dtype
+
+    adapter = torch.nn.Module()
+    adapter.register_buffer("device_anchor", torch.empty(0, dtype=torch.float32))
+
+    device, dtype = module_device_dtype(adapter)
+
+    assert device.type == "cpu"
+    assert dtype == torch.float32
+
+
 def source_image(color=(110, 75, 55), size=(38, 32)):
     return Image.new("RGB", size, color)
 

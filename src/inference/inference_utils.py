@@ -14,8 +14,18 @@ import torch.nn.functional as F
 
 
 def module_device_dtype(module: torch.nn.Module) -> tuple[torch.device, torch.dtype]:
-    parameter = next(module.parameters())
-    return parameter.device, parameter.dtype
+    parameter = next(module.parameters(), None)
+    if parameter is not None:
+        return parameter.device, parameter.dtype
+    # Frozen inference adapters may intentionally expose only a device/dtype
+    # anchor buffer (no trainable or non-trainable parameters).
+    buffer = next(module.buffers(), None)
+    if buffer is not None:
+        return buffer.device, buffer.dtype
+    raise ValueError(
+        f"Cannot infer device/dtype for {module.__class__.__name__}: "
+        "module has neither parameters nor buffers"
+    )
 
 
 def inference_autocast(bundle: Mapping[str, Any], device: torch.device):

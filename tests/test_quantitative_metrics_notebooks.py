@@ -23,3 +23,14 @@ def test_comparison_notebook_enables_integrated_metrics():
     assert "metrics_config=METRICS_CONFIG" in source
     assert "metrics=True" in source
     assert "target_images=TARGET_IMAGES" in source
+
+
+def test_ablation_metrics_notebook_keeps_training_resolution_for_inference():
+    source = _source("output/abliations/Abliations_metrics_paper.ipynb")
+    assert '"image_size": 400' in source
+
+
+def test_ablation_master_runs_baseline_phase_before_ablations():
+    source = _source("output/abliations/Abliations_metrics_paper.ipynb")
+    assert "baseline_first=True" in source
+    assert "all_manifests.extend(_run_baseline_phase" in source
