@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
 import importlib.util
 import sys
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -67,30 +65,45 @@ def expected_dex_age(logits: np.ndarray) -> np.ndarray:
 
 
 class AdaFaceAligner:
-    """Official AdaFace alignment wrapper loaded from a local repository."""
+    """Official AdaFace MTCNN aligner without importing training modules.
 
-    def __init__(self, repo_path: str | Path):
+    The repository's convenience ``face_alignment.align`` module can pull in
+    AdaFace training-only modules such as ``data.py`` (and therefore optional
+    packages like ``pytorch_lightning``/``bcolz``).  Metrics need only the
+    inference MTCNN, so load ``mtcnn.py`` directly in an isolated module.
+    """
+
+    def __init__(self, repo_path: str | Path, device="auto"):
+        import torch
+
         repo = Path(repo_path).expanduser().resolve()
         if not repo.is_dir():
             raise FileNotFoundError(f"AdaFace repository not found: {repo}")
-        loaded = sys.modules.get("face_alignment")
-        loaded_path = Path(getattr(loaded, "__file__", "")).resolve() if loaded else None
-        if loaded_path is not None and repo not in loaded_path.parents:
-            for name in list(sys.modules):
-                if name == "face_alignment" or name.startswith("face_alignment."):
-                    del sys.modules[name]
-        sys.path.insert(0, str(repo))
+        mtcnn_path = repo / "face_alignment" / "mtcnn.py"
+        if not mtcnn_path.is_file():
+            raise FileNotFoundError(f"AdaFace MTCNN implementation not found: {mtcnn_path}")
+        resolved_device = resolve_torch_device(device)
+        mtcnn_device = "cuda:0" if resolved_device.type == "cuda" else "cpu"
+        face_alignment_root = str(mtcnn_path.parent)
+        previous_path = list(sys.path)
+        sys.path.insert(0, face_alignment_root)
         try:
-            self._align = importlib.import_module("face_alignment.align")
+            spec = importlib.util.spec_from_file_location(
+                "_face_aging_adaface_mtcnn", mtcnn_path
+            )
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Could not import AdaFace MTCNN implementation: {mtcnn_path}")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
         finally:
-            if sys.path[0] == str(repo):
-                sys.path.pop(0)
+            sys.path[:] = previous_path
+        self._mtcnn = module.MTCNN(device=mtcnn_device, crop_size=(112, 112))
 
     def __call__(self, image: Image.Image):
-        with tempfile.NamedTemporaryFile(suffix=".png") as handle:
-            image.convert("RGB").save(handle.name)
-            aligned = self._align.get_aligned_face(handle.name)
-        return None if aligned is None else aligned.convert("RGB")
+        _, faces = self._mtcnn.align_multi(image.convert("RGB"), limit=1)
+        if not faces:
+            return None
+        return faces[0].convert("RGB")
 
 
 class AdaFaceEncoder:
@@ -235,7 +248,7 @@ def load_quantitative_metrics(
         inception_weights_path=kid_inception_weights_path,
     )
     return {
-        "aligner": AdaFaceAligner(adaface_repo_path),
+        "aligner": AdaFaceAligner(adaface_repo_path, device=device),
         "identity_encoder": AdaFaceEncoder(
             adaface_repo_path, adaface_checkpoint_path, adaface_architecture, device
         ),

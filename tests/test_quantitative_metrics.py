@@ -434,6 +434,32 @@ def test_auto_device_resolves_to_cpu_without_cuda(monkeypatch):
     assert str(resolve_torch_device("auto")) == "cpu"
 
 
+def test_adaface_aligner_loads_mtcnn_directly_without_training_modules(tmp_path):
+    from src.quantitative_metrics.backends import AdaFaceAligner
+
+    face_alignment = tmp_path / "AdaFace" / "face_alignment"
+    face_alignment.mkdir(parents=True)
+    (face_alignment / "mtcnn.py").write_text(
+        """
+from PIL import Image
+
+class MTCNN:
+    def __init__(self, device, crop_size):
+        self.device = device
+        self.crop_size = crop_size
+
+    def align_multi(self, image, limit=None):
+        return [object()], [image.resize(self.crop_size)]
+""",
+        encoding="utf-8",
+    )
+
+    aligner = AdaFaceAligner(tmp_path / "AdaFace", device="cpu")
+    aligned = aligner(Image.new("RGB", (20, 20), "white"))
+
+    assert aligned.size == (112, 112)
+
+
 def test_kid_is_computed_per_ablation_group_not_pooled(tmp_path):
     from src.quantitative_metrics import evaluate_aging_outputs
 
