@@ -17,6 +17,7 @@ import torch
 
 from .generate_images import age_image
 from .load_models import load_aging_models
+from .identity_metadata import TEST_ID_GENDERS
 from src.quantitative_metrics import (
     evaluate_aging_outputs,
     evaluate_aging_inference_picking,
@@ -29,24 +30,22 @@ MODEL_NAMES = ("SAM", "FRAN", "FADING", "CUSP", "HRFAE", "Cradle2Cane")
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
 
-def select_test_transitions(test_root, *, max_transitions_per_id=5, direction="aging"):
-    """Select largest age gaps within each identity, deterministically.
+def select_test_transitions(test_root, *, max_transitions_per_id=None, direction="aging"):
+    """Keep all aging pairs and, in ``both``, add 30% reverse pairs.
 
     ``35_1.jpg`` is an additional photograph at age 35. Prefer ``35.jpg``
     when present and select one image per age to avoid duplicate age pairs.
-    ``both`` targets 70% aging / 30% rejuvenation across the selected panel.
-    Rounding is balanced across identities (e.g. 4/1 then 3/2 for five pairs).
-    Keep both directions per identity when the cap and available pairs permit.
+    Rejuvenation count is round(0.30 * aging_count), at least one when
+    possible, selected by largest age gaps across the panel. This is 30%
+    additional pairs, not 30% of the final total. The former cap argument is
+    accepted for notebook compatibility but no longer limits the panel.
     """
     root = Path(test_root).expanduser().resolve()
     if not root.is_dir():
         raise FileNotFoundError(f"Test directory not found: {root}")
-    if isinstance(max_transitions_per_id, bool) or not isinstance(max_transitions_per_id, int) or max_transitions_per_id < 1:
-        raise ValueError("max_transitions_per_id must be a positive integer")
     if direction not in {"aging", "rejuvenation", "both"}:
         raise ValueError("direction must be 'aging', 'rejuvenation' or 'both'")
     rows = []
-    aging_selected = 0
     for folder in sorted(root.glob("id_*")):
         if not folder.is_dir():
             continue
@@ -64,20 +63,7 @@ def select_test_transitions(test_root, *, max_transitions_per_id=5, direction="a
             and (direction == "both" or (target > source if direction == "aging" else target < source))
         ]
         pairs.sort(key=lambda pair: (-abs(pair[1] - pair[0]), pair[0], pair[1]))
-        if direction == "both" and pairs:
-            aging = [pair for pair in pairs if pair[1] > pair[0]]
-            rejuvenation = [pair for pair in pairs if pair[1] < pair[0]]
-            count = min(max_transitions_per_id, len(pairs))
-            # Balance integer rounding over the whole panel rather than giving
-            # every five-pair identity 4/1 (80%) or every identity 3/2 (60%).
-            target_aging = (7 * (len(rows) + count) + 5) // 10
-            minimum = max(1 if count >= 2 else 0, count - len(rejuvenation))
-            maximum = min(count - 1 if count >= 2 else count, len(aging))
-            aging_count = max(minimum, min(maximum, target_aging - aging_selected))
-            pairs = aging[:aging_count] + rejuvenation[:count - aging_count]
-            pairs.sort(key=lambda pair: (-abs(pair[1] - pair[0]), pair[0], pair[1]))
-            aging_selected += aging_count
-        for source, target in pairs[:max_transitions_per_id]:
+        for source, target in pairs:
             rows.append({
                 "sample_id": f"{folder.name}__{source}_to_{target}",
                 "identity_id": folder.name,
@@ -87,6 +73,15 @@ def select_test_transitions(test_root, *, max_transitions_per_id=5, direction="a
             })
     if not rows:
         raise ValueError("No valid longitudinal transitions; expected id_*/<age>.<jpg|png>")
+    if direction == "both":
+        aging = [row for row in rows if row["delta_age"] > 0]
+        reverse = sorted(
+            (row for row in rows if row["delta_age"] < 0),
+            key=lambda row: (-abs(row["delta_age"]), row["identity_id"], row["source_age"], row["target_age"]),
+        )
+        count = min(len(reverse), max(1, (3 * len(aging) + 5) // 10))
+        rows = aging + reverse[:count]
+        rows.sort(key=lambda row: (row["identity_id"], -abs(row["delta_age"]), row["source_age"], row["target_age"]))
     return pd.DataFrame(rows)
 
 
@@ -152,9 +147,9 @@ def evaluate_test_set(
     metrics_bundle=None,
     metrics_config=None,
     metrics_root="/content/evaluation_models",
-    max_transitions_per_id=5,
+    max_transitions_per_id=None,
     direction="aging",
-    gender="male",
+    gender=None,
     gender_by_id=None,
     seed=2026,
     device=None,
@@ -176,7 +171,9 @@ def evaluate_test_set(
     direct inference) and ``ours_picking`` (iterative smart strength search,
     at most eight trials per transition). Both generate at 400px by default.
     ``our_mode='direct'`` or ``'picking'`` evaluates just that variant.
-    Supply gender_by_id for models needing gender; labels are never inferred.
+    Known IDs use the user-supplied TEST_ID_GENDERS labels automatically.
+    gender_by_id overrides them (male/female or H/M); gender is an optional
+    fallback for unknown IDs. All aging pairs are retained without a cap.
 
     A mandatory metric smoke test runs on real input photographs before any
     generation, including actual AdaFace/DEX and KID forwards. Then, up to two *real* transitions run through
@@ -224,9 +221,19 @@ def evaluate_test_set(
     samples = select_test_transitions(
         test_root, max_transitions_per_id=max_transitions_per_id, direction=direction,
     )
-    genders = {row.identity_id: (gender_by_id or {}).get(row.identity_id, gender) for row in samples.itertuples()}
-    if any(value not in {"male", "female"} for value in genders.values()):
-        raise ValueError("gender and gender_by_id values must be 'male' or 'female'")
+    genders = {}
+    aliases = {"h": "male", "m": "female", "male": "male", "female": "female"}
+    for identity in samples.identity_id.unique():
+        label = (gender_by_id or {}).get(identity, TEST_ID_GENDERS.get(identity, gender))
+        if label is None:
+            if {"FADING", "Cradle2Cane"}.intersection(selected):
+                raise ValueError(f"Missing gender for {identity}; supply gender_by_id or an explicit gender fallback")
+            label = "male"  # Unused by the other models, but age_image requires a valid value.
+        normalized = aliases.get(str(label).lower().strip())
+        if normalized is None:
+            raise ValueError(f"Invalid gender for {identity}: {label}; use H/M or male/female")
+        genders[identity] = normalized
+    samples["gender"] = samples.identity_id.map(genders)
     inference = {"image_size": 400, "num_inference_steps": 40, "strength": 0.35, "seed": seed}
     inference.update(our_inference_config or {})
     if not math.isfinite(float(inference["strength"])) or not 0 < float(inference["strength"]) <= 1:
