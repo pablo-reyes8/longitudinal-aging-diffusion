@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import torch
 from pathlib import Path
+from .resident_models import ACTIVE_MODEL_SESSION
 
 from PIL import Image
 
@@ -20,6 +21,8 @@ from PIL import Image
 # ============================================================
 
 def _clear_vram():
+    if ACTIVE_MODEL_SESSION.get() is not None:
+        return
     gc.collect()
 
     if torch.cuda.is_available():
@@ -95,9 +98,19 @@ def _to_temp_file(image):
 
 
 def _move_model(model, device):
+    session = ACTIVE_MODEL_SESSION.get()
+    if session is not None and session.owns(model):
+        return session.place(model, device)
     model = model.to(device)
     model.eval()
     return model
+
+
+def _release_after_image(model):
+    session = ACTIVE_MODEL_SESSION.get()
+    if session is not None and session.owns(model):
+        return model
+    return model.to("cpu")
 
 
 def _find_images(folder):
@@ -378,6 +391,10 @@ def _run_verbose(
         )
     )
 
+    session = ACTIVE_MODEL_SESSION.get()
+    if session is not None and session.accepts_command(cmd, cwd):
+        return session.run_command(cmd, cwd, env)
+
     proc = subprocess.run(
         list(map(str, cmd)),
         cwd=cwd,
@@ -478,6 +495,10 @@ def age_image(
 
     Memory policy
     -------------
+    Dataset evaluation uses an internal per-model residency scope: SAM/FRAN
+    remain on the current device and FADING/HRFAE reuse one worker and loaded
+    model for the full pending panel. Standalone calls keep the policy below.
+
     SAM:
         CPU -> GPU -> complete sweep -> CPU
 
@@ -846,15 +867,13 @@ def age_image(
         finally:
 
             print(
-                "SAM -> CPU"
+                "SAM stays resident" if ACTIVE_MODEL_SESSION.get() else "SAM -> CPU"
             )
 
             try:
 
                 B["model"] = (
-                    model.to(
-                        "cpu"
-                    )
+                    _release_after_image(model)
                 )
 
             except Exception:
@@ -1036,15 +1055,13 @@ def age_image(
             )
 
             print(
-                "FRAN reproduction -> CPU"
+                "FRAN stays resident" if ACTIVE_MODEL_SESSION.get() else "FRAN reproduction -> CPU"
             )
 
             try:
 
                 B["model"] = (
-                    model.to(
-                        "cpu"
-                    )
+                    _release_after_image(model)
                 )
 
             except Exception:

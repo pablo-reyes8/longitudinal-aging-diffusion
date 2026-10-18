@@ -18,6 +18,7 @@ import torch
 from .generate_images import age_image
 from .load_models import load_aging_models
 from .identity_metadata import TEST_ID_GENDERS
+from .resident_models import ModelSession
 from src.quantitative_metrics import (
     evaluate_aging_outputs,
     evaluate_aging_inference_picking,
@@ -176,8 +177,11 @@ def evaluate_test_set(
     fallback for unknown IDs. All aging pairs are retained without a cap.
 
     A mandatory metric smoke test runs on real input photographs before any
-    generation, including actual AdaFace/DEX and KID forwards. Then, up to two *real* transitions run through
-    every selected model, AdaFace/DEX and a small KID check. Completed generations persist immediately;
+    generation, including actual AdaFace/DEX and KID forwards. At the start of
+    each model phase, up to two real transitions run through that model and a
+    small metric check. Its remaining panel is then processed while the model
+    stays resident; it is released before advancing to the next model.
+    Completed generations persist immediately;
     resume only reuses them when inputs and configuration match. KID is computed
     once per model over the complete common set, never per identity.
     Individual generation failures are logged and skipped, including during
@@ -285,23 +289,45 @@ def evaluate_test_set(
         samples, metrics_bundle, output / "preflight" / "metrics",
         seed=options["kid_seed"], batch_size=options.get("batch_size", 32),
     )
-    if external and comparison_bundle is None:
+    def has_pending_generations(name):
+        if not resume:
+            return True
+        for sample in samples.to_dict("records"):
+            destination = output / "generated" / report_names[name] / sample["identity_id"] / f"{sample['sample_id']}.png"
+            marker = destination.with_suffix(".json")
+            try:
+                cached = json.loads(marker.read_text())
+                if cached.get("signature") != signature:
+                    return True
+                if cached.get("status") == "failed":
+                    if retry_failed:
+                        return True
+                    continue
+                with Image.open(destination) as opened:
+                    opened.verify()
+            except (OSError, ValueError):
+                return True
+        return False
+
+    pending_external = [name for name in external if has_pending_generations(name)]
+    if pending_external and comparison_bundle is None:
         loader_options = dict(model_loader_config or {})
-        loader_options.update(models=external, load_metrics=False)
+        loader_options.update(models=pending_external, load_metrics=False)
         comparison_bundle = load_aging_models(**loader_options)
-    for name in external:
+    for name in pending_external:
         if comparison_bundle.get(name) is None:
             raise RuntimeError(f"{name} was not prepared by load_aging_models; check its setup log")
 
     from src.inference import infer_face_aging_direct, load_face_aging_inference_bundle
 
     own_bundle = None
+    own_device_active = False
     manifest_rows = []
     inference_failures = []
     resolved_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
     def _generate(name, sample):
-        nonlocal own_bundle
+        nonlocal own_bundle, own_device_active
         report_name = report_names[name]
         destination = output / "generated" / report_name / sample["identity_id"] / f"{sample['sample_id']}.png"
         marker = destination.with_suffix(".json")
@@ -321,6 +347,12 @@ def evaluate_test_set(
                         checkpoint, device="cpu", local_files_only=local_files_only,
                         load_auxiliary_models=False,
                     )
+                if not own_device_active:
+                    for key in ("unet", "vae", "text_encoder", "age_delta_conditioner"):
+                        if own_bundle.get(key) is not None:
+                            own_bundle[key].to(resolved_device)
+                    own_bundle["_reuse_loaded_checkpoint"] = True
+                    own_device_active = True
                 options = dict(inference)
                 strength = policy[float(sample["target_age"])] if policy is not None else options["strength"]
                 options["strength"] = strength
@@ -335,10 +367,6 @@ def evaluate_test_set(
                     # Budget is explicit and applies independently per transition.
                     options["max_trials_per_target"] = picking_max_trials
                     options.setdefault("generate_assisted_prompt_variant", False)
-                    # Keep the entire owned bundle together on its chosen device.
-                    for key in ("unet", "vae", "text_encoder", "age_delta_conditioner"):
-                        if own_bundle.get(key) is not None:
-                            own_bundle[key].to(resolved_device)
                     result = evaluate_aging_inference_picking(
                         checkpoint, sample["source_path"], sample["source_age"], [sample["target_age"]],
                         target_images={sample["target_age"]: sample["target_path"]},
@@ -377,6 +405,7 @@ def evaluate_test_set(
 
     def generate(name, sample):
         """Persist a failure as a missing prediction, never as a fabricated image."""
+        nonlocal own_device_active
         report_name = report_names[name]
         destination = output / "generated" / report_name / sample["identity_id"] / f"{sample['sample_id']}.png"
         marker = destination.with_suffix(".json")
@@ -396,7 +425,9 @@ def evaluate_test_set(
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 marker.write_text(json.dumps({"signature": signature, "status": "failed", "error": error}))
                 try:
-                    _offload(own_bundle)
+                    if name in own_names:
+                        _offload(own_bundle)
+                        own_device_active = False
                 except Exception as cleanup_error:
                     print(f"[cleanup warning] {cleanup_error}", flush=True)
         print(f"[skip] {report_name} / {sample['sample_id']}: {error}", flush=True)
@@ -414,27 +445,32 @@ def evaluate_test_set(
         # for the end of a potentially expensive run to discover missing assets.
         probe_size = min(2, len(records))
         for name in selected:
-            probe_rows = [generate(name, sample) for sample in records[:probe_size]]
-            try:
-                probe = evaluate_aging_outputs(
-                    pd.DataFrame(probe_rows), metrics_bundle=metrics_bundle,
-                    output_dir=output / "preflight" / name, compute_kid=(probe_size >= 2),
-                    kid_subsets=1, kid_subset_size=2, kid_seed=seed,
-                )
-                values = probe["per_sample"]
-                metrics_ok = values[[
-                    "adaface_cosine_source", "adaface_cosine_gt", "dex_age_abs_error",
-                ]].notna().all().all()
-                kid_ok = probe_size < 2 or probe["summary"].iloc[0]["kid_status"] == "ok"
-                if not metrics_ok or not kid_ok:
-                    print(f"[preflight warning] Missing results for {name}; continuing. See {output / 'preflight' / name}", flush=True)
-            except Exception as exc:
-                print(f"[preflight warning] {name}: {exc}; continuing.", flush=True)
-            _offload(own_bundle)
-        for name in selected:
-            for sample in records[probe_size:]:
-                generate(name, sample)
-            _offload(own_bundle)
+            # Cached rows do not activate a model/worker. Pending requests use
+            # one resident model for the entire phase, including preflight.
+            with ModelSession(comparison_bundle, name):
+                probe_rows = [generate(name, sample) for sample in records[:probe_size]]
+                try:
+                    probe = evaluate_aging_outputs(
+                        pd.DataFrame(probe_rows), metrics_bundle=metrics_bundle,
+                        output_dir=output / "preflight" / name, compute_kid=(probe_size >= 2),
+                        kid_subsets=1, kid_subset_size=2, kid_seed=seed,
+                    )
+                    values = probe["per_sample"]
+                    metrics_ok = values[[
+                        "adaface_cosine_source", "adaface_cosine_gt", "dex_age_abs_error",
+                    ]].notna().all().all()
+                    kid_ok = probe_size < 2 or probe["summary"].iloc[0]["kid_status"] == "ok"
+                    if not metrics_ok or not kid_ok:
+                        print(f"[preflight warning] Missing results for {name}; continuing. See {output / 'preflight' / name}", flush=True)
+                except Exception as exc:
+                    print(f"[preflight warning] {name}: {exc}; continuing.", flush=True)
+                for sample in records[probe_size:]:
+                    generate(name, sample)
+            if name in own_names:
+                _offload(own_bundle)
+                own_device_active = False
+            else:
+                _offload(None)
         evaluation = evaluate_aging_outputs(
             pd.DataFrame(manifest_rows), metrics_bundle=metrics_bundle,
             output_dir=output / "metrics", **options,

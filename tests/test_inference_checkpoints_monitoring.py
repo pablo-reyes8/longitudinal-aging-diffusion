@@ -67,6 +67,33 @@ def test_inference_and_training_resume_checkpoints_load_without_optimizer_depend
         assert torch.equal(expected["image_tensor"], observed["image_tensor"])
 
 
+def test_owned_inference_checkpoint_is_reused_until_parameters_change(monkeypatch, tmp_path):
+    from src.model import get_bundle_trainable_named_parameters
+
+    bundle, checkpoint, _ = make_saved_checkpoints(tmp_path)
+    load_face_aging_adapter_for_inference(bundle, checkpoint)
+    bundle["_reuse_loaded_checkpoint"] = True
+    real_load = torch.load
+    reads = []
+
+    def recording_load(*args, **kwargs):
+        reads.append(args[0])
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "load", recording_load)
+    for _ in range(4):
+        load_face_aging_adapter_for_inference(bundle, checkpoint)
+    assert reads == []
+    parameter = next(iter(dict(get_bundle_trainable_named_parameters(bundle)).values()))
+    with torch.no_grad():
+        parameter.add_(1)
+    load_face_aging_adapter_for_inference(bundle, checkpoint)
+    assert len(reads) == 1
+    bundle["_reuse_loaded_checkpoint"] = False
+    load_face_aging_adapter_for_inference(bundle, checkpoint)
+    assert len(reads) == 2
+
+
 def test_training_builtin_inverse_monitor_uses_same_image_and_writes_each_epoch(tiny_root, tmp_path):
     loaders, _ = build_face_aging_dataloaders(
         tiny_root, image_size=32, batch_size=2, num_workers=0,

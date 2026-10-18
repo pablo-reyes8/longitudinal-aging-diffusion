@@ -41,9 +41,24 @@ def load_face_aging_adapter_for_inference(
     *,
     strict_config: bool = True,
 ) -> dict[str, Any]:
-    payload = torch.load(Path(checkpoint_path).expanduser(), map_location="cpu", weights_only=False)
-    saved_config = _checkpoint_config(payload)
+    path = Path(checkpoint_path).expanduser().resolve()
     current_config = dict(bundle.get("config", {}))
+    fingerprint = (str(path), path.stat().st_size, path.stat().st_mtime_ns)
+    # Dataset evaluation owns a fixed, already-loaded adapter for a whole model
+    # phase. Avoid re-reading/copying it on every smart strength sweep. Other
+    # callers retain the normal explicit reload behavior.
+    reuse = bundle.get("_reuse_loaded_checkpoint", False)
+    cached = bundle.get("_loaded_adapter_cache") if reuse else None
+    if cached and cached["fingerprint"] == fingerprint and cached["config"] == repr(current_config):
+        parameters = dict(get_bundle_trainable_named_parameters(bundle))
+        versions = tuple((name, id(parameter), parameter._version) for name, parameter in parameters.items())
+        if versions == cached["versions"]:
+            report = cached["report"]
+            if strict_config and report["mismatches"]:
+                raise ValueError(f"Inference checkpoint is incompatible with bundle: {report['mismatches']}")
+            return report
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    saved_config = _checkpoint_config(payload)
     mismatches = {
         key: {"checkpoint": saved_config.get(key), "bundle": current_config.get(key)}
         for key in PROTECTED_KEYS
@@ -66,13 +81,19 @@ def load_face_aging_adapter_for_inference(
     bundle["unet"].eval()
     bundle["vae"].eval()
     bundle["text_encoder"].eval()
-    return {
+    report = {
         "checkpoint_kind": payload.get("kind", "legacy_adapter"),
         "loaded_tensors": len(state),
         "config": saved_config,
         "mismatches": mismatches,
         "training_config": payload.get("training_config"),
     }
+    bundle["_loaded_adapter_cache"] = {
+        "fingerprint": fingerprint, "config": repr(current_config),
+        "versions": tuple((name, id(parameter), parameter._version) for name, parameter in parameters.items()),
+        "report": report,
+    }
+    return report
 
 
 def load_face_aging_inference_bundle(

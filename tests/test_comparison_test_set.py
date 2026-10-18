@@ -155,7 +155,7 @@ def test_pipeline_common_panel_wide_csv_global_kid_and_resume(monkeypatch, tmp_p
     )
     result = api.evaluate_test_set(root, checkpoint, **kwargs)
 
-    assert [event[0] for event in events[:5]] == ["load_ours", "ours", "ours", "SAM", "SAM"]
+    assert [event[0] for event in events[:6]] == ["load_ours", "ours", "ours", "ours", "ours", "SAM"]
     own_events = [options for name, options in events if name == "ours"]
     assert len(own_events) == 4 and all(options["image_size"] == 400 for options in own_events)
     assert kid.calls == [(2, 2), (2, 2), (2, 2), (4, 4), (4, 4)]
@@ -166,8 +166,12 @@ def test_pipeline_common_panel_wide_csv_global_kid_and_resume(monkeypatch, tmp_p
     assert set(result["summary"].n_samples) == {4}
 
     event_count = len(events)
-    api.evaluate_test_set(root, checkpoint, **kwargs)
+    protocol_before = (kwargs["output_dir"] / "run_config.json").read_text()
+    # A restored old-format run uses the same signature-only JSON markers.
+    # Fully completed baselines need not even be present in the new bundle.
+    api.evaluate_test_set(root, checkpoint, **{**kwargs, "comparison_bundle": {}})
     assert len(events) == event_count  # cached generations, metrics recomputed
+    assert (kwargs["output_dir"] / "run_config.json").read_text() == protocol_before
     with pytest.raises(ValueError, match="another protocol"):
         api.evaluate_test_set(root, checkpoint, **{**kwargs, "seed": 9})
 
