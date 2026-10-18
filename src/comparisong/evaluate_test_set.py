@@ -166,6 +166,7 @@ def evaluate_test_set(
     diagnostic_config=None,
     evaluation_config=None,
     resume=True,
+    retry_failed=False,
 ):
     """Compare literature models and an adapter on one shared longitudinal panel.
 
@@ -182,6 +183,8 @@ def evaluate_test_set(
     every selected model, AdaFace/DEX and a small KID check. Completed generations persist immediately;
     resume only reuses them when inputs and configuration match. KID is computed
     once per model over the complete common set, never per identity.
+    Individual generation failures are logged and skipped, including during
+    model preflight. Resume skips recorded failures unless retry_failed=True.
     """
     lookup = {name.lower(): name for name in MODEL_NAMES}
     lookup["ours"] = "ours"
@@ -287,16 +290,18 @@ def evaluate_test_set(
 
     own_bundle = None
     manifest_rows = []
+    inference_failures = []
     resolved_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-    def generate(name, sample):
+    def _generate(name, sample):
         nonlocal own_bundle
         report_name = report_names[name]
         destination = output / "generated" / report_name / sample["identity_id"] / f"{sample['sample_id']}.png"
         marker = destination.with_suffix(".json")
         valid = False
         if resume and destination.is_file() and marker.is_file():
-            valid = json.loads(marker.read_text()).get("signature") == signature
+            cached = json.loads(marker.read_text())
+            valid = cached.get("signature") == signature and cached.get("status") != "failed"
             if valid:
                 with Image.open(destination) as opened:
                     opened.verify()
@@ -357,9 +362,43 @@ def evaluate_test_set(
                     raise RuntimeError(f"{name} produced no image for {sample['sample_id']}: {result.get('status')}")
                 generated.save(destination)
             marker.write_text(json.dumps({"signature": signature}))
-        row = {**sample, "model_name": report_name, "generated_path": str(destination)}
+        row = {**sample, "model_name": report_name, "generated_path": str(destination),
+               "inference_status": "ok", "inference_error": None}
         manifest_rows.append(row)
         pd.DataFrame(manifest_rows).to_csv(output / "prediction_manifest.csv", index=False)
+        return row
+
+    def generate(name, sample):
+        """Persist a failure as a missing prediction, never as a fabricated image."""
+        report_name = report_names[name]
+        destination = output / "generated" / report_name / sample["identity_id"] / f"{sample['sample_id']}.png"
+        marker = destination.with_suffix(".json")
+        error = None
+        if resume and not retry_failed and marker.is_file():
+            try:
+                cached = json.loads(marker.read_text())
+                if cached.get("signature") == signature and cached.get("status") == "failed":
+                    error = cached.get("error", "Previously failed generation")
+            except (OSError, ValueError):
+                pass
+        if error is None:
+            try:
+                return _generate(name, sample)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text(json.dumps({"signature": signature, "status": "failed", "error": error}))
+                try:
+                    _offload(own_bundle)
+                except Exception as cleanup_error:
+                    print(f"[cleanup warning] {cleanup_error}", flush=True)
+        print(f"[skip] {report_name} / {sample['sample_id']}: {error}", flush=True)
+        row = {**sample, "model_name": report_name, "generated_path": None,
+               "inference_status": "failed", "inference_error": error}
+        manifest_rows.append(row)
+        inference_failures.append(row)
+        pd.DataFrame(manifest_rows).to_csv(output / "prediction_manifest.csv", index=False)
+        pd.DataFrame(inference_failures).to_csv(output / "inference_failures.csv", index=False)
         return row
 
     try:
@@ -369,18 +408,21 @@ def evaluate_test_set(
         probe_size = min(2, len(records))
         for name in selected:
             probe_rows = [generate(name, sample) for sample in records[:probe_size]]
-            probe = evaluate_aging_outputs(
-                pd.DataFrame(probe_rows), metrics_bundle=metrics_bundle,
-                output_dir=output / "preflight" / name, compute_kid=(probe_size >= 2),
-                kid_subsets=1, kid_subset_size=2, kid_seed=seed,
-            )
-            values = probe["per_sample"]
-            if not values[[
-                "adaface_cosine_source", "adaface_cosine_gt", "dex_age_abs_error",
-            ]].notna().all().all():
-                raise RuntimeError(f"Preflight metrics failed for {name}; see {output / 'preflight' / name}")
-            if probe_size >= 2 and probe["summary"].iloc[0]["kid_status"] != "ok":
-                raise RuntimeError(f"Preflight KID failed for {name}; see {output / 'preflight' / name}")
+            try:
+                probe = evaluate_aging_outputs(
+                    pd.DataFrame(probe_rows), metrics_bundle=metrics_bundle,
+                    output_dir=output / "preflight" / name, compute_kid=(probe_size >= 2),
+                    kid_subsets=1, kid_subset_size=2, kid_seed=seed,
+                )
+                values = probe["per_sample"]
+                metrics_ok = values[[
+                    "adaface_cosine_source", "adaface_cosine_gt", "dex_age_abs_error",
+                ]].notna().all().all()
+                kid_ok = probe_size < 2 or probe["summary"].iloc[0]["kid_status"] == "ok"
+                if not metrics_ok or not kid_ok:
+                    print(f"[preflight warning] Missing results for {name}; continuing. See {output / 'preflight' / name}", flush=True)
+            except Exception as exc:
+                print(f"[preflight warning] {name}: {exc}; continuing.", flush=True)
             _offload(own_bundle)
         for name in selected:
             for sample in records[probe_size:]:
@@ -390,17 +432,27 @@ def evaluate_test_set(
             pd.DataFrame(manifest_rows), metrics_bundle=metrics_bundle,
             output_dir=output / "metrics", **options,
         )
-        metric_columns = ["adaface_cosine_source", "adaface_cosine_gt", "dex_predicted_age", "dex_age_abs_error"]
+        metric_columns = ["adaface_cosine_source", "adaface_cosine_gt", "dex_predicted_age", "dex_age_abs_error",
+                          "inference_status", "inference_error"]
         wide = evaluation["per_sample"].pivot(index="sample_id", columns="model_name", values=metric_columns)
         wide.columns = [f"{model}__{metric}" for metric, model in wide.columns]
         transitions = samples.merge(wide.reset_index(), on="sample_id", validate="one_to_one")
         transitions.to_csv(output / "transition_metrics.csv", index=False)
+        coverage = pd.DataFrame(manifest_rows).assign(
+            generated=lambda frame: frame["inference_status"].eq("ok").astype(int),
+        ).groupby("model_name")["generated"].agg(n_generated="sum", n_attempted="size").reset_index()
+        coverage["n_failed_generation"] = coverage["n_attempted"] - coverage["n_generated"]
+        evaluation["summary"] = evaluation["summary"].merge(coverage, on="model_name", validate="one_to_one")
         evaluation["summary"].to_csv(output / "paper_metrics.csv", index=False)
+        pd.DataFrame(inference_failures, columns=[*samples.columns, "model_name", "generated_path", "inference_status", "inference_error"]).to_csv(
+            output / "inference_failures.csv", index=False,
+        )
         print(evaluation["summary"].to_string(index=False))
         return {
             "transitions": samples, "per_transition": transitions,
             "summary": evaluation["summary"], "evaluation": evaluation,
-            "paths": {"transitions": output / "transition_metrics.csv", "paper": output / "paper_metrics.csv"},
+            "paths": {"transitions": output / "transition_metrics.csv", "paper": output / "paper_metrics.csv",
+                      "failures": output / "inference_failures.csv"},
         }
     finally:
         _offload(own_bundle)

@@ -139,22 +139,71 @@ def test_pipeline_common_panel_wide_csv_global_kid_and_resume(monkeypatch, tmp_p
         api.evaluate_test_set(root, checkpoint, **{**kwargs, "seed": 9})
 
 
-def test_preflight_failure_stops_before_bulk_and_keeps_completed_image(monkeypatch, tmp_path):
+def test_model_preflight_failure_is_recorded_and_other_models_complete(monkeypatch, tmp_path):
     root, checkpoint, metrics, kid, events = setup_pipeline(monkeypatch, tmp_path)
 
     def fail(*args, **kwargs):
         raise RuntimeError("SAM dependency unavailable")
 
     monkeypatch.setattr(api, "age_image", fail)
-    with pytest.raises(RuntimeError, match="dependency unavailable"):
-        api.evaluate_test_set(
-            root, checkpoint, tmp_path / "results", models=["ours", "SAM"],
-            comparison_bundle={"SAM": {}}, metrics_bundle=metrics,
-            our_mode="direct",
-        )
-    assert len([name for name, _ in events if name == "ours"]) == 2
-    assert kid.calls == [(2, 2), (2, 2)]
-    assert len(list((tmp_path / "results" / "generated").rglob("*.png"))) == 2
+    result = api.evaluate_test_set(
+        root, checkpoint, tmp_path / "results", models=["ours", "SAM"],
+        comparison_bundle={"SAM": {}}, metrics_bundle=metrics,
+        our_mode="direct",
+    )
+    assert len([name for name, _ in events if name == "ours"]) == len(result["transitions"])
+    summary = result["summary"].set_index("model_name")
+    assert summary.loc["SAM", "n_failed_generation"] == len(result["transitions"])
+    assert summary.loc["ours_strength_0.35", "n_failed_generation"] == 0
+    assert result["paths"]["failures"].is_file()
+
+
+@pytest.mark.parametrize("failed_model", ["SAM", "ours"])
+def test_late_image_failure_continues_and_resume_only_retries_when_requested(monkeypatch, tmp_path, failed_model):
+    import src.inference as inference
+
+    root, checkpoint, metrics, _, events = setup_pipeline(monkeypatch, tmp_path)
+    attempts = []
+    original = api.age_image if failed_model == "SAM" else inference.infer_face_aging_direct
+
+    def fail_for_last_identity(*args, **kwargs):
+        image = kwargs["image"]
+        attempts.append(str(image))
+        if "id_2" in str(image):
+            raise RuntimeError("Could not find face in image. Try another!")
+        return original(*args, **kwargs)
+
+    owner = api if failed_model == "SAM" else inference
+    method = "age_image" if failed_model == "SAM" else "infer_face_aging_direct"
+    monkeypatch.setattr(owner, method, fail_for_last_identity)
+    kwargs = dict(
+        models=["SAM", "ours"], comparison_bundle={"SAM": {}}, metrics_bundle=metrics,
+        our_mode="direct", max_transitions_per_id=2,
+    )
+    result = api.evaluate_test_set(root, checkpoint, tmp_path / "results", **kwargs)
+    report_name = "SAM" if failed_model == "SAM" else "ours_strength_0.35"
+    summary = result["summary"].set_index("model_name")
+    assert summary.loc[report_name, "n_failed_generation"] == 1
+    assert summary.loc[report_name, "n_generated"] == 2
+    assert summary.loc[report_name, "kid_status"] == "incomplete_generated_set"
+    assert result["per_transition"][f"{report_name}__inference_status"].tolist().count("failed") == 1
+    assert len(pd.read_csv(result["paths"]["failures"])) == 1
+
+    attempt_count = len(attempts)
+    api.evaluate_test_set(root, checkpoint, tmp_path / "results", **kwargs)
+    assert len(attempts) == attempt_count
+
+    retried = []
+
+    def fixed(*args, **kwargs):
+        retried.append(kwargs["image"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, method, fixed)
+    recovered = api.evaluate_test_set(root, checkpoint, tmp_path / "results", retry_failed=True, **kwargs)
+    assert len(retried) == 1
+    assert recovered["summary"].n_failed_generation.sum() == 0
+    assert pd.read_csv(recovered["paths"]["failures"]).empty
 
 
 def test_own_strength_map_is_exact_and_loaded_only_once(monkeypatch, tmp_path):
