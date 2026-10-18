@@ -3,12 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def test_comparison_package_exports_only_the_two_high_level_operations():
+def test_comparison_package_exports_generation_and_dataset_evaluation():
     from src import comparisong
 
     assert callable(comparisong.load_aging_models)
     assert callable(comparisong.age_image)
-    assert comparisong.__all__ == ["load_aging_models", "age_image"]
+    assert callable(comparisong.evaluate_test_set)
+    assert callable(comparisong.select_test_transitions)
 
 
 def test_fading_loader_uses_stable_runner_and_applies_path_fix_without_network(
