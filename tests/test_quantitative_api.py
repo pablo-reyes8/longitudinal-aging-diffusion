@@ -244,3 +244,53 @@ def test_metric_backends_can_supply_picking_diagnostics_without_pyfeat():
 
     assert identity(images).shape == (2, 3)
     assert torch.allclose(age(images), torch.tensor([53.0, 53.0]))
+
+
+def test_smart_picking_runs_eight_real_strength_trials_and_exports_best(monkeypatch, tmp_path):
+    import src.quantitative_metrics.api as api
+
+    checkpoint = tmp_path / "adapter.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    source, target = tmp_path / "source.png", tmp_path / "target.png"
+    Image.new("RGB", (24, 24), "gray").save(source)
+    Image.new("RGB", (24, 24), "white").save(target)
+    strengths = []
+
+    def infer(**kwargs):
+        strengths.append(kwargs["strength"])
+        return {
+            "image": Image.new("RGB", (24, 24), "gray"),
+            "diagnostics": {
+                "predicted_source_age": 20.0,
+                "predicted_generated_age": 25.0,
+                "identity_cosine_source_generated": 0.9,
+            },
+        }
+
+    monkeypatch.setattr("src.inference.smart_age_sweep.infer_face_aging", infer)
+    monkeypatch.setattr(
+        "src.inference.smart_age_sweep.load_face_aging_adapter_for_inference", lambda *a, **kw: {}
+    )
+
+    class Identity:
+        def embed_batch(self, images):
+            return np.ones((len(images), 3))
+
+    class Age:
+        def predict_batch(self, images):
+            return np.full(len(images), 25.0)
+
+    result = api.evaluate_aging_inference_picking(
+        checkpoint, source, 20, [70], target_images={70: target},
+        metrics_bundle={"aligner": lambda image: image, "identity_encoder": Identity(), "age_estimator": Age()},
+        inference_bundle={}, search_method="smart", target_age_strength_map={70: 0.1},
+        diagnostic_config={"image_size": 24, "generate_assisted_prompt_variant": False},
+        output_dir=tmp_path / "results", download_assets=False,
+    )
+
+    assert len(strengths) == 8
+    assert len(set(strengths)) == 8
+    assert result["manifest"].iloc[0].trials_run == 8
+    assert result["manifest"].iloc[0].search_method == "smart"
+    assert result["diagnostic"].attrs["bias_corrected"] is False
+    assert result["generated_paths"][70.0].is_file()

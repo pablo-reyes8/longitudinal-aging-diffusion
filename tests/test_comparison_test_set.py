@@ -34,6 +34,38 @@ def test_selection_limits_each_identity_and_prioritizes_large_gaps(tmp_path):
     assert (both.delta_age < 0).any() and (both.delta_age > 0).any()
 
 
+def test_both_balances_seventy_percent_aging_and_keeps_largest_gaps(tmp_path):
+    root = tmp_path / "data"
+    for identity in ("id_1", "id_2"):
+        folder = root / identity
+        folder.mkdir(parents=True)
+        for age in (19, 30, 35, 45, 60, 70):
+            Image.new("RGB", (8, 8)).save(folder / f"{age}.png")
+
+    selected = api.select_test_transitions(root, direction="both")
+
+    assert len(selected) == 10
+    assert (selected.delta_age > 0).sum() == 7
+    assert (selected.delta_age < 0).sum() == 3
+    assert selected.groupby("identity_id").size().to_dict() == {"id_1": 5, "id_2": 5}
+    first = selected[selected.identity_id == "id_1"]
+    assert sorted(first[first.delta_age > 0].delta_age, reverse=True) == [51, 41, 40, 35]
+    assert first[first.delta_age < 0].delta_age.tolist() == [-51]
+    pd.testing.assert_frame_equal(selected, api.select_test_transitions(root, direction="both"))
+
+
+def test_both_keeps_available_directions_with_only_two_photos(tmp_path):
+    root = tmp_path / "data"
+    folder = root / "id_1"
+    folder.mkdir(parents=True)
+    for age in (20, 60):
+        Image.new("RGB", (8, 8)).save(folder / f"{age}.png")
+
+    selected = api.select_test_transitions(root, direction="both")
+
+    assert sorted(selected.delta_age) == [-40, 40]
+
+
 class Identity:
     def embed_batch(self, images):
         return np.ones((len(images), 3))
@@ -85,6 +117,7 @@ def test_pipeline_common_panel_wide_csv_global_kid_and_resume(monkeypatch, tmp_p
     root, checkpoint, metrics, kid, events = setup_pipeline(monkeypatch, tmp_path)
     kwargs = dict(
         models=["ours", "SAM"], comparison_bundle={"SAM": {}}, metrics_bundle=metrics,
+        our_mode="direct",
         max_transitions_per_id=2, output_dir=tmp_path / "results", device="cpu",
     )
     result = api.evaluate_test_set(root, checkpoint, **kwargs)
@@ -95,7 +128,7 @@ def test_pipeline_common_panel_wide_csv_global_kid_and_resume(monkeypatch, tmp_p
     assert kid.calls == [(2, 2), (2, 2), (3, 3), (3, 3)]
     assert len(result["per_transition"]) == 3
     assert "SAM__dex_age_abs_error" in result["per_transition"]
-    assert "ours__adaface_cosine_gt" in result["per_transition"]
+    assert "ours_strength_0.35__adaface_cosine_gt" in result["per_transition"]
     assert result["paths"]["paper"].is_file()
     assert set(result["summary"].n_samples) == {3}
 
@@ -117,6 +150,7 @@ def test_preflight_failure_stops_before_bulk_and_keeps_completed_image(monkeypat
         api.evaluate_test_set(
             root, checkpoint, tmp_path / "results", models=["ours", "SAM"],
             comparison_bundle={"SAM": {}}, metrics_bundle=metrics,
+            our_mode="direct",
         )
     assert len([name for name, _ in events if name == "ours"]) == 2
     assert kid.calls == [(2, 2)]
@@ -128,6 +162,7 @@ def test_own_strength_map_is_exact_and_loaded_only_once(monkeypatch, tmp_path):
     api.evaluate_test_set(
         root, checkpoint, tmp_path / "results", models=["ours"], metrics_bundle=metrics,
         max_transitions_per_id=1, target_age_strength_map={70: 0.29, 53: 0.27},
+        our_mode="direct",
     )
     assert len([name for name, _ in events if name == "load_ours"]) == 1
     assert [options["strength"] for name, options in events if name == "ours"] == [0.29, 0.27]
@@ -154,6 +189,33 @@ def test_picking_reuses_metrics_and_preserves_prompt_options(monkeypatch, tmp_pa
     assert all(call["diagnostic_backend"] == "metrics" for call in captured)
     assert all(call["diagnostic_config"]["negative_prompt"] == "blur" for call in captured)
     assert all(call["diagnostic_config"]["image_size"] == 400 for call in captured)
+    assert all(call["diagnostic_config"]["max_trials_per_target"] == 8 for call in captured)
+    assert all(call["search_method"] == "smart" for call in captured)
+
+
+def test_default_reports_direct_and_smart_picking_on_the_same_panel(monkeypatch, tmp_path):
+    root, checkpoint, metrics, kid, events = setup_pipeline(monkeypatch, tmp_path)
+    captured = []
+    generated = tmp_path / "picked.png"
+    Image.new("RGB", (16, 16), "gray").save(generated)
+
+    def pick(*args, **kwargs):
+        captured.append(kwargs)
+        return {"generated_paths": {70: generated}}
+
+    monkeypatch.setattr(api, "evaluate_aging_inference_picking", pick)
+    result = api.evaluate_test_set(
+        root, checkpoint, tmp_path / "results", models=["ours"], metrics_bundle=metrics,
+        max_transitions_per_id=1, our_inference_config={"strength": 0.22},
+    )
+    assert set(result["summary"].model_name) == {"ours_strength_0.22", "ours_picking"}
+    assert "ours_picking__dex_age_abs_error" in result["per_transition"]
+    assert len(captured) == 2
+    assert all(call["diagnostic_config"]["max_trials_per_target"] == 8 for call in captured)
+    assert all(list(call["target_age_strength_map"].values()) == [0.22] for call in captured)
+    assert [options["strength"] for name, options in events if name == "ours"] == [0.22, 0.22]
+    assert len([name for name, _ in events if name == "load_ours"]) == 1
+    assert kid.calls == [(2, 2), (2, 2), (2, 2), (2, 2)]
 
 
 def test_setup_reuses_existing_loader_and_prepares_metrics_on_cpu(monkeypatch, tmp_path):

@@ -227,6 +227,8 @@ def test_assisted_smart_sweep_reuses_base_winners_without_repeating_search(
         for call in assisted_calls
     )
     assert frame.attrs["assisted"]["trials_run"].tolist() == [1, 1]
+    assert len(frame.attrs["assisted_results"]) == 2
+    assert all(isinstance(result["image"], Image.Image) for result in frame.attrs["assisted_results"])
     assert frame.attrs["assisted"]["prompt_assistance_scale"].tolist() == [0.35, 0.35]
     for attr in (
         "grid_path",

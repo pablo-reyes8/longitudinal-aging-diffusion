@@ -833,6 +833,7 @@ def diagnose_checkpoint_smart_age_sweep(
     if generate_assisted_prompt_variant:
         summary_frame.attrs.update({
             "assisted": assisted_frame,
+            "assisted_results": [candidate["result"] for candidate in assisted_candidates],
             "assisted_grid_path": (
                 str(assisted_grid_path) if assisted_grid_path else None
             ),

@@ -17,7 +17,12 @@ def test_comparison_loader_adds_local_metrics_bundle(monkeypatch, tmp_path):
         captured.update(kwargs)
         return expected
 
+    def fake_prepare(**kwargs):
+        captured["prepared"] = True
+        return {**kwargs["metrics_config"], "local_files_only": True}
+
     monkeypatch.setattr("src.quantitative_metrics.load_quantitative_metrics", fake_loader)
+    monkeypatch.setattr("src.quantitative_metrics.prepare_quantitative_metrics", fake_prepare)
     bundle = load_models.load_aging_models(
         root=tmp_path,
         models=(),
@@ -33,6 +38,8 @@ def test_comparison_loader_adds_local_metrics_bundle(monkeypatch, tmp_path):
     assert bundle["quantitative_metrics"] is expected
     assert captured["adaface_repo_path"] == "/models/AdaFace"
     assert captured["local_files_only"] is True
+    assert captured["prepared"] is True
+    assert captured["device"] == "cpu"
 
 
 def test_build_comparison_manifest_maps_same_person_targets_by_age(tmp_path):

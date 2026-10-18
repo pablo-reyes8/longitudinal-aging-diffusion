@@ -210,6 +210,18 @@ def load_aging_models(
         for x in models
     }
 
+    # Prepare and validate metric assets before spending time loading baselines.
+    # The shared helper reuses intact downloads and applies the pinned fallback.
+    quantitative_metrics = None
+    if load_metrics:
+        from src.quantitative_metrics import prepare_quantitative_metrics, load_quantitative_metrics
+
+        metric_options = dict(metrics_config or {})
+        if metric_options.get("device") in {None, "auto"}:
+            metric_options["device"] = "cpu"
+        metric_options = prepare_quantitative_metrics(metrics_config=metric_options)
+        quantitative_metrics = load_quantitative_metrics(**metric_options)
+
     bundle = {
         "root": root,
 
@@ -225,7 +237,7 @@ def load_aging_models(
         "CUSP": None,
         "HRFAE": None,
         "Cradle2Cane": None,
-        "quantitative_metrics": None,
+        "quantitative_metrics": quantitative_metrics,
 
         # Default benchmark:
         # Cradle2Cane intentionally excluded.
@@ -1279,18 +1291,6 @@ def load_aging_models(
     # ========================================================
 
     bundle = fix_aging_baselines(bundle)
-
-    if load_metrics:
-        if not metrics_config:
-            raise ValueError(
-                "metrics_config is required when load_metrics=True and must contain "
-                "local AdaFace and DEX paths."
-            )
-        from src.quantitative_metrics import load_quantitative_metrics
-
-        metric_options = dict(metrics_config)
-        metric_options.setdefault("local_files_only", True)
-        bundle["quantitative_metrics"] = load_quantitative_metrics(**metric_options)
 
     _clear_vram()
 

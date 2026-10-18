@@ -455,6 +455,7 @@ def evaluate_aging_inference_picking(
     model_name: str = "checkpoint_picked",
     diagnostic_config: Mapping[str, Any] | None = None,
     diagnostic_backend: str = "metrics",
+    search_method: str = "adaptive",
     evaluation_config: Mapping[str, Any] | None = None,
     device=None,
     dtype=None,
@@ -470,6 +471,10 @@ def evaluate_aging_inference_picking(
     independent from the optional training-only ``py-feat``/MiVOLO stack.
     Set ``diagnostic_backend="auxiliary"`` only when those differentiable
     auxiliary models are intentionally installed and desired.
+
+    ``search_method='smart'`` uses the iterative strength search rather than
+    the fixed-strength adaptive sweep. Set ``max_trials_per_target`` in
+    diagnostic_config to control its budget (default eight).
     """
     checkpoint = Path(checkpoint_path).expanduser()
     source = Path(source_image).expanduser()
@@ -480,6 +485,8 @@ def evaluate_aging_inference_picking(
     ages = _validate_target_ages(target_ages)
     if any(age != int(age) for age in ages):
         raise ValueError("adaptive picking requires integer target ages")
+    if search_method not in {"adaptive", "smart"}:
+        raise ValueError("search_method must be 'adaptive' or 'smart'")
     target_lookup = _target_image_lookup(target_images, ages)
     metrics, prepared_config = _load_external_metrics(
         metrics_bundle=metrics_bundle,
@@ -507,7 +514,7 @@ def evaluate_aging_inference_picking(
             bundle["identity_encoder"], bundle["age_estimator"] = (
                 _build_metric_diagnostic_adapters(metrics)
             )
-    from src.inference import diagnose_checkpoint_adaptive_age_sweep
+    from src.inference import diagnose_checkpoint_adaptive_age_sweep, diagnose_checkpoint_smart_age_sweep
 
     options = dict(diagnostic_config or {})
     protected = {"checkpoint_path", "bundle", "source_image", "source_age", "target_ages"}
@@ -520,7 +527,14 @@ def evaluate_aging_inference_picking(
     # Picking compares the canonical candidate with the prompt-assisted one by
     # default; callers can explicitly set this to False for a base-only sweep.
     options.setdefault("generate_assisted_prompt_variant", True)
-    diagnostic_df = diagnose_checkpoint_adaptive_age_sweep(
+    sweep = diagnose_checkpoint_adaptive_age_sweep
+    if search_method == "smart":
+        sweep = diagnose_checkpoint_smart_age_sweep
+        options.setdefault("max_trials_per_target", 8)
+        if diagnostic_backend == "metrics":
+            # MiVOLO's personalized calibration is not a DEX calibration.
+            options.setdefault("use_bias_corrected_mivolo_target", False)
+    diagnostic_df = sweep(
         checkpoint_path=checkpoint,
         bundle=bundle,
         source_image=source,
@@ -528,7 +542,9 @@ def evaluate_aging_inference_picking(
         target_ages=ages,
         **options,
     )
-    base_results = list(diagnostic_df.attrs.get("base_results", []))
+    base_results = list(diagnostic_df.attrs.get(
+        "selected_results" if search_method == "smart" else "base_results", []
+    ))
     assisted_results = list(diagnostic_df.attrs.get("assisted_results", []))
     assisted_frame = diagnostic_df.attrs.get("assisted")
     if len(base_results) != len(ages):
@@ -577,6 +593,8 @@ def evaluate_aging_inference_picking(
                 "strength": float(selected["row"].get("effective_strength", selected["row"].get("strength"))),
                 "age_error": float(selected["row"].get("age_error", float("nan"))),
                 "identity_cosine": float(selected["row"].get("identity_cosine", float("nan"))),
+                "trials_run": selected["row"].get("trials_run", 1),
+                "search_method": search_method,
             })
         manifest = pd.DataFrame(rows)
         evaluation = _evaluate_generated_manifest(

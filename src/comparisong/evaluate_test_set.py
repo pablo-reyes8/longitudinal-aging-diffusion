@@ -6,6 +6,7 @@ import gc
 import hashlib
 import inspect
 import json
+import math
 from pathlib import Path
 import re
 import shutil
@@ -33,6 +34,9 @@ def select_test_transitions(test_root, *, max_transitions_per_id=5, direction="a
 
     ``35_1.jpg`` is an additional photograph at age 35. Prefer ``35.jpg``
     when present and select one image per age to avoid duplicate age pairs.
+    ``both`` targets 70% aging / 30% rejuvenation across the selected panel.
+    Rounding is balanced across identities (e.g. 4/1 then 3/2 for five pairs).
+    Keep both directions per identity when the cap and available pairs permit.
     """
     root = Path(test_root).expanduser().resolve()
     if not root.is_dir():
@@ -42,6 +46,7 @@ def select_test_transitions(test_root, *, max_transitions_per_id=5, direction="a
     if direction not in {"aging", "rejuvenation", "both"}:
         raise ValueError("direction must be 'aging', 'rejuvenation' or 'both'")
     rows = []
+    aging_selected = 0
     for folder in sorted(root.glob("id_*")):
         if not folder.is_dir():
             continue
@@ -59,6 +64,19 @@ def select_test_transitions(test_root, *, max_transitions_per_id=5, direction="a
             and (direction == "both" or (target > source if direction == "aging" else target < source))
         ]
         pairs.sort(key=lambda pair: (-abs(pair[1] - pair[0]), pair[0], pair[1]))
+        if direction == "both" and pairs:
+            aging = [pair for pair in pairs if pair[1] > pair[0]]
+            rejuvenation = [pair for pair in pairs if pair[1] < pair[0]]
+            count = min(max_transitions_per_id, len(pairs))
+            # Balance integer rounding over the whole panel rather than giving
+            # every five-pair identity 4/1 (80%) or every identity 3/2 (60%).
+            target_aging = (7 * (len(rows) + count) + 5) // 10
+            minimum = max(1 if count >= 2 else 0, count - len(rejuvenation))
+            maximum = min(count - 1 if count >= 2 else count, len(aging))
+            aging_count = max(minimum, min(maximum, target_aging - aging_selected))
+            pairs = aging[:aging_count] + rejuvenation[:count - aging_count]
+            pairs.sort(key=lambda pair: (-abs(pair[1] - pair[0]), pair[0], pair[1]))
+            aging_selected += aging_count
         for source, target in pairs[:max_transitions_per_id]:
             rows.append({
                 "sample_id": f"{folder.name}__{source}_to_{target}",
@@ -101,7 +119,8 @@ def evaluate_test_set(
     seed=2026,
     device=None,
     local_files_only=False,
-    our_mode="direct",
+    our_mode="both",
+    picking_max_trials=8,
     our_inference_config=None,
     target_age_strength_map=None,
     diagnostic_config=None,
@@ -112,7 +131,10 @@ def evaluate_test_set(
 
     Model setup reuses ``load_aging_models`` (including its compatibility fixes),
     or accepts its existing bundle. Metrics load on CPU by default. ``ours``
-    uses 400px direct inference unless ``our_mode='picking'`` is requested.
+    expands ``ours`` to two reported models by default: ``ours_strength_X`` (configured
+    direct inference) and ``ours_picking`` (iterative smart strength search,
+    at most eight trials per transition). Both generate at 400px by default.
+    ``our_mode='direct'`` or ``'picking'`` evaluates just that variant.
     Supply gender_by_id for models needing gender; labels are never inferred.
 
     Before processing the full panel, up to two *real* transitions run through
@@ -122,12 +144,24 @@ def evaluate_test_set(
     """
     lookup = {name.lower(): name for name in MODEL_NAMES}
     lookup["ours"] = "ours"
+    lookup["ours_picking"] = "ours_picking"
     requested = [models] if isinstance(models, str) else list(models)
     if not requested or any(str(name).lower() not in lookup for name in requested):
-        raise ValueError(f"models must select from {(*MODEL_NAMES, 'ours')}")
+        raise ValueError(f"models must select from {(*MODEL_NAMES, 'ours', 'ours_picking')}")
     selected = list(dict.fromkeys(lookup[str(name).lower()] for name in requested))
-    if our_mode not in {"direct", "picking"}:
-        raise ValueError("our_mode must be 'direct' or 'picking'")
+    if our_mode not in {"direct", "picking", "both"}:
+        raise ValueError("our_mode must be 'direct', 'picking' or 'both'")
+    if isinstance(picking_max_trials, bool) or not isinstance(picking_max_trials, int) or not 1 <= picking_max_trials <= 20:
+        raise ValueError("picking_max_trials must be an integer in [1, 20]")
+    expanded = []
+    for name in selected:
+        if name == "ours":
+            expanded.extend(["ours", "ours_picking"] if our_mode == "both" else
+                            ["ours_picking"] if our_mode == "picking" else ["ours"])
+        else:
+            expanded.append(name)
+    selected = list(dict.fromkeys(expanded))
+    own_names = {"ours", "ours_picking"}
     options = dict(evaluation_config or {})
     options.update(compute_id_source=True, compute_id_gt=True, compute_age_mae=True, compute_kid=True)
     options.setdefault("kid_seed", seed)
@@ -141,7 +175,7 @@ def evaluate_test_set(
     if options.get("kid_subset_size") is not None and int(options["kid_subset_size"]) < 2:
         raise ValueError("kid_subset_size must be at least two")
     checkpoint = Path(checkpoint_path).expanduser().resolve()
-    if "ours" in selected and not checkpoint.is_file():
+    if own_names.intersection(selected) and not checkpoint.is_file():
         raise FileNotFoundError(f"Adapter checkpoint not found: {checkpoint}")
     samples = select_test_transitions(
         test_root, max_transitions_per_id=max_transitions_per_id, direction=direction,
@@ -151,6 +185,8 @@ def evaluate_test_set(
         raise ValueError("gender and gender_by_id values must be 'male' or 'female'")
     inference = {"image_size": 400, "num_inference_steps": 40, "strength": 0.35, "seed": seed}
     inference.update(our_inference_config or {})
+    if not math.isfinite(float(inference["strength"])) or not 0 < float(inference["strength"]) <= 1:
+        raise ValueError("our_inference_config strength must be finite and in (0, 1]")
     protected = {"bundle", "image", "source_age", "target_age", "device", "compute_diagnostics", "return_dict", "output_type"}
     if protected.intersection(inference):
         raise ValueError(f"our_inference_config cannot override {sorted(protected.intersection(inference))}")
@@ -161,16 +197,24 @@ def evaluate_test_set(
             raise ValueError(f"Invalid strength map or missing target ages: {sorted(missing)}")
     else:
         policy = None
+    direct_label = (
+        "ours_strength_map" if policy is not None else
+        "ours_strength_adaptive" if inference.get("use_delta_dependent_strength", False) else
+        f"ours_strength_{float(inference['strength']):g}"
+    )
+    report_names = {name: direct_label if name == "ours" else name for name in selected}
     output = Path(output_dir).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
     # Include file fingerprints so resume cannot silently mix different inputs.
     files = sorted(set(samples.source_path) | set(samples.target_path))
-    if "ours" in selected:
+    if own_names.intersection(selected):
         files.append(str(checkpoint))
     settings = {
         "samples": samples.to_dict("records"), "models": selected,
         "files": [(name, Path(name).stat().st_size, Path(name).stat().st_mtime_ns) for name in files],
         "inference": inference, "policy": policy, "mode": our_mode,
+        "picking_max_trials": picking_max_trials,
+        "picking_search_method": "smart",
         "diagnostic": diagnostic_config, "genders": genders, "seed": seed,
         "loader": model_loader_config,
     }
@@ -180,7 +224,7 @@ def evaluate_test_set(
         raise ValueError("Output directory contains another protocol; choose a new output_dir or resume=False")
     run_file.write_text(json.dumps({"signature": signature, "settings": settings}, indent=2, default=str))
     samples.to_csv(output / "transitions.csv", index=False)
-    external = [name for name in selected if name != "ours"]
+    external = [name for name in selected if name not in own_names]
     if metrics_bundle is None and comparison_bundle is not None:
         metrics_bundle = comparison_bundle.get("quantitative_metrics")
     if metrics_bundle is None:
@@ -202,7 +246,8 @@ def evaluate_test_set(
 
     def generate(name, sample):
         nonlocal own_bundle
-        destination = output / "generated" / name / sample["identity_id"] / f"{sample['sample_id']}.png"
+        report_name = report_names[name]
+        destination = output / "generated" / report_name / sample["identity_id"] / f"{sample['sample_id']}.png"
         marker = destination.with_suffix(".json")
         valid = False
         if resume and destination.is_file() and marker.is_file():
@@ -212,8 +257,8 @@ def evaluate_test_set(
                     opened.verify()
         if not valid:
             destination.parent.mkdir(parents=True, exist_ok=True)
-            print(f"[{name}] {sample['sample_id']}", flush=True)
-            if name == "ours":
+            print(f"[{report_name}] {sample['sample_id']}", flush=True)
+            if name in own_names:
                 if own_bundle is None:
                     own_bundle = load_face_aging_inference_bundle(
                         checkpoint, device="cpu", local_files_only=local_files_only,
@@ -222,9 +267,16 @@ def evaluate_test_set(
                 options = dict(inference)
                 strength = policy[float(sample["target_age"])] if policy is not None else options["strength"]
                 options["strength"] = strength
-                if our_mode == "picking":
-                    options.pop("strength")
+                if name == "ours_picking":
+                    common_keys = {
+                        "image_size", "num_inference_steps", "seed", "text_reference_mode",
+                        "age_guidance_scale", "text_guidance_scale", "image_guidance_scale",
+                        "negative_prompt", "prompt_style", "use_cfg", "source_prompt",
+                    }
+                    options = {key: value for key, value in options.items() if key in common_keys}
                     options.update(diagnostic_config or {})
+                    # Budget is explicit and applies independently per transition.
+                    options["max_trials_per_target"] = picking_max_trials
                     options.setdefault("generate_assisted_prompt_variant", False)
                     # Keep the entire owned bundle together on its chosen device.
                     for key in ("unet", "vae", "text_encoder", "age_delta_conditioner"):
@@ -236,6 +288,7 @@ def evaluate_test_set(
                         target_age_strength_map={sample["target_age"]: strength},
                         metrics_bundle=metrics_bundle, inference_bundle=own_bundle,
                         diagnostic_backend="metrics", diagnostic_config=options,
+                        search_method="smart", model_name=name,
                         output_dir=output / "picking" / sample["sample_id"], download_assets=False,
                     )
                     shutil.copyfile(next(iter(result["generated_paths"].values())), destination)
@@ -259,7 +312,7 @@ def evaluate_test_set(
                     raise RuntimeError(f"{name} produced no image for {sample['sample_id']}: {result.get('status')}")
                 generated.save(destination)
             marker.write_text(json.dumps({"signature": signature}))
-        row = {**sample, "model_name": name, "generated_path": str(destination)}
+        row = {**sample, "model_name": report_name, "generated_path": str(destination)}
         manifest_rows.append(row)
         pd.DataFrame(manifest_rows).to_csv(output / "prediction_manifest.csv", index=False)
         return row
