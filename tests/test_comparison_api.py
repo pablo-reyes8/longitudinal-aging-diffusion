@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 
 def test_comparison_package_exports_generation_and_dataset_evaluation():
     from src import comparisong
@@ -10,6 +12,36 @@ def test_comparison_package_exports_generation_and_dataset_evaluation():
     assert callable(comparisong.age_image)
     assert callable(comparisong.evaluate_test_set)
     assert callable(comparisong.select_test_transitions)
+
+
+def test_sam_alignment_loads_from_its_file_despite_cached_project_scripts(monkeypatch, tmp_path):
+    import sys
+    from types import ModuleType
+    from src.comparisong import load_models
+
+    scripts = tmp_path / "SAM" / "scripts"
+    scripts.mkdir(parents=True)
+    # SAM's scripts directory need not be a Python package. The host project
+    # has its own unrelated scripts package, which must not resolve this import.
+    (scripts / "align_all_parallel.py").write_text(
+        "def align_face(filepath, predictor):\n    return ('SAM', filepath, predictor)\n",
+        encoding="utf-8",
+    )
+    host_scripts = ModuleType("scripts")
+    host_scripts.__path__ = [str(tmp_path / "host_scripts")]
+    monkeypatch.setitem(sys.modules, "scripts", host_scripts)
+
+    align = load_models._load_sam_align_face(scripts.parent)
+
+    assert align("face.png", "landmarks") == ("SAM", "face.png", "landmarks")
+    assert sys.modules["scripts"] is host_scripts
+
+
+def test_sam_alignment_reports_incomplete_repository(tmp_path):
+    from src.comparisong import load_models
+
+    with pytest.raises(FileNotFoundError, match="align_all_parallel.py"):
+        load_models._load_sam_align_face(tmp_path)
 
 
 def test_fading_loader_uses_stable_runner_and_applies_path_fix_without_network(

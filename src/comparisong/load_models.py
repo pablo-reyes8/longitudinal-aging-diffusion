@@ -4,6 +4,7 @@ import gc
 import glob
 import zipfile
 import subprocess
+import importlib.util
 import torch
 
 from argparse import Namespace
@@ -78,6 +79,24 @@ def _purge_modules(prefixes):
 # ============================================================
 # MAIN LOADER
 # ============================================================
+
+def _load_sam_align_face(sam_root):
+    """Load SAM alignment without colliding with the host's scripts package.
+
+    A regular ``scripts`` package elsewhere on sys.path takes precedence over
+    SAM's namespace directory even when SAM is inserted first on sys.path.
+    Load the actual file instead of resolving that ambiguous package name.
+    """
+    path = Path(sam_root) / "scripts" / "align_all_parallel.py"
+    if not path.is_file():
+        raise FileNotFoundError(f"SAM alignment implementation is missing: {path}")
+    spec = importlib.util.spec_from_file_location("_face_aging_sam_alignment", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load SAM alignment implementation: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.align_face
+
 
 def load_aging_models(
     root="/content/aging_benchmarks",
@@ -368,7 +387,7 @@ def load_aging_models(
         from models.psp import pSp
         from datasets.augmentations import AgeTransformer
         from utils.common import tensor2im
-        from scripts.align_all_parallel import align_face
+        align_face = _load_sam_align_face(sam_root)
 
         import dlib
 
