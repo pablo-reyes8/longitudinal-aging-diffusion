@@ -101,6 +101,46 @@ def _offload(bundle):
         torch.cuda.empty_cache()
 
 
+def _smoke_test_metrics(samples, metrics_bundle, output_dir, *, seed, batch_size=32):
+    """Exercise real metric forwards before any model generation.
+
+    Real input photographs stand in for generated images only in this smoke
+    report. Its numbers are never included in the comparison or paper CSVs.
+    Two distinct photographs allow KID to run even for a one-transition test.
+    """
+    print("[metrics smoke] Checking AdaFace, DEX and KID before generation...", flush=True)
+    references = {}
+    for sample in samples.to_dict("records"):
+        for key in ("source_path", "target_path"):
+            references.setdefault(sample[key], sample)
+        if len(references) >= 2:
+            break
+    rows = [
+        {**sample, "sample_id": f"metrics_smoke_{index}",
+         "generated_path": path, "model_name": "__metrics_smoke__"}
+        for index, (path, sample) in enumerate(list(references.items())[:2])
+    ]
+    report = evaluate_aging_outputs(
+        pd.DataFrame(rows), metrics_bundle=metrics_bundle, output_dir=output_dir,
+        compute_kid=True, kid_subsets=1, kid_subset_size=2, kid_seed=seed,
+        batch_size=batch_size,
+    )
+    columns = ["adaface_cosine_source", "adaface_cosine_gt", "dex_age_abs_error"]
+    individual_ok = all(
+        pd.notna(value) and math.isfinite(float(value))
+        for value in report["per_sample"][columns].to_numpy().flat
+    )
+    summary = report["summary"].iloc[0]
+    kid_ok = summary["kid_status"] == "ok" and math.isfinite(float(summary["kid_mean"]))
+    if not individual_ok or not kid_ok:
+        errors = report["failures"].head(3).to_dict("records")
+        raise RuntimeError(
+            f"Metrics smoke failed before any generation: {errors}. "
+            f"See {output_dir} (KID status: {summary['kid_status']})."
+        )
+    print("[metrics smoke] OK: AdaFace ID-Source / ID-GT, DEX and KID", flush=True)
+
+
 def evaluate_test_set(
     test_root,
     checkpoint_path,
@@ -137,7 +177,8 @@ def evaluate_test_set(
     ``our_mode='direct'`` or ``'picking'`` evaluates just that variant.
     Supply gender_by_id for models needing gender; labels are never inferred.
 
-    Before processing the full panel, up to two *real* transitions run through
+    A mandatory metric smoke test runs on real input photographs before any
+    generation, including actual AdaFace/DEX and KID forwards. Then, up to two *real* transitions run through
     every selected model, AdaFace/DEX and a small KID check. Completed generations persist immediately;
     resume only reuses them when inputs and configuration match. KID is computed
     once per model over the complete common set, never per identity.
@@ -230,6 +271,10 @@ def evaluate_test_set(
     if metrics_bundle is None:
         config = prepare_quantitative_metrics(metrics_root, device="cpu", metrics_config=metrics_config)
         metrics_bundle = load_quantitative_metrics(**config)
+    _smoke_test_metrics(
+        samples, metrics_bundle, output / "preflight" / "metrics",
+        seed=options["kid_seed"], batch_size=options.get("batch_size", 32),
+    )
     if external and comparison_bundle is None:
         loader_options = dict(model_loader_config or {})
         loader_options.update(models=external, load_metrics=False)

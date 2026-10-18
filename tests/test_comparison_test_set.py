@@ -125,7 +125,7 @@ def test_pipeline_common_panel_wide_csv_global_kid_and_resume(monkeypatch, tmp_p
     assert [event[0] for event in events[:5]] == ["load_ours", "ours", "ours", "SAM", "SAM"]
     own_events = [options for name, options in events if name == "ours"]
     assert len(own_events) == 3 and all(options["image_size"] == 400 for options in own_events)
-    assert kid.calls == [(2, 2), (2, 2), (3, 3), (3, 3)]
+    assert kid.calls == [(2, 2), (2, 2), (2, 2), (3, 3), (3, 3)]
     assert len(result["per_transition"]) == 3
     assert "SAM__dex_age_abs_error" in result["per_transition"]
     assert "ours_strength_0.35__adaface_cosine_gt" in result["per_transition"]
@@ -153,7 +153,7 @@ def test_preflight_failure_stops_before_bulk_and_keeps_completed_image(monkeypat
             our_mode="direct",
         )
     assert len([name for name, _ in events if name == "ours"]) == 2
-    assert kid.calls == [(2, 2)]
+    assert kid.calls == [(2, 2), (2, 2)]
     assert len(list((tmp_path / "results" / "generated").rglob("*.png"))) == 2
 
 
@@ -215,7 +215,27 @@ def test_default_reports_direct_and_smart_picking_on_the_same_panel(monkeypatch,
     assert all(list(call["target_age_strength_map"].values()) == [0.22] for call in captured)
     assert [options["strength"] for name, options in events if name == "ours"] == [0.22, 0.22]
     assert len([name for name, _ in events if name == "load_ours"]) == 1
-    assert kid.calls == [(2, 2), (2, 2), (2, 2), (2, 2)]
+    assert kid.calls == [(2, 2), (2, 2), (2, 2), (2, 2), (2, 2)]
+
+
+@pytest.mark.parametrize("backend", ["age_estimator", "identity_encoder", "kid_metric"])
+def test_metrics_smoke_failure_prevents_any_generation(monkeypatch, tmp_path, backend):
+    root, checkpoint, metrics, _, events = setup_pipeline(monkeypatch, tmp_path)
+
+    class Broken:
+        def fail(self, *args, **kwargs):
+            raise RuntimeError("metric backend unavailable")
+
+        predict_batch = embed_batch = compute = fail
+
+    metrics[backend] = Broken()
+    with pytest.raises(RuntimeError, match="Metrics smoke failed before any generation"):
+        api.evaluate_test_set(
+            root, checkpoint, tmp_path / "results", models=["SAM", "ours"],
+            comparison_bundle={"SAM": {}}, metrics_bundle=metrics,
+        )
+    assert events == []
+    assert not (tmp_path / "results" / "generated").exists()
 
 
 def test_setup_reuses_existing_loader_and_prepares_metrics_on_cpu(monkeypatch, tmp_path):
