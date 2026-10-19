@@ -1,0 +1,5 @@
+{
+  "summary_columns": ["adaface_id_source_mean", "adaface_id_gt_mean", "dex_age_mae"],
+  "summary_values": [[0.7071067811865476, 0.7071067811865476, 10.0]],
+  "per_sample_metric_columns": ["delta_age", "adaface_cosine_source", "adaface_cosine_gt", "adaface_real_source_target_cosine", "dex_predicted_age", "dex_age_abs_error", "identity_face_detected", "age_face_detected", "source_sha256", "target_sha256", "generated_sha256"]
+}

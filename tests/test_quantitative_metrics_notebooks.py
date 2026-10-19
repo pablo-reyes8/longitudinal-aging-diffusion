@@ -17,12 +17,14 @@ def test_standalone_metrics_notebook_documents_manifest_evaluation():
     assert "same person" in source.lower()
 
 
-def test_comparison_notebook_enables_integrated_metrics():
+def test_comparison_notebook_is_sweeps_only_and_paper_metrics_are_separate():
     source = _source("notebooks/Model_comparisong.ipynb")
-    assert "load_metrics=True" in source
-    assert "metrics_config=METRICS_CONFIG" in source
-    assert "metrics=True" in source
-    assert "target_images=TARGET_IMAGES" in source
+    assert "load_metrics=False" in source
+    assert "metrics=False" in source
+    assert "evaluate_test_set(" not in source
+    paper = _source("notebooks/Paper_comparison_bias_v2.ipynb")
+    assert "evaluate_paper_v2" in paper and "run_sd15_before_after" in paper
+    assert "ANCHORS_REVIEWED = False" in paper
 
 
 def test_ablation_metrics_notebook_keeps_training_resolution_for_inference():
