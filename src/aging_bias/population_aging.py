@@ -8,6 +8,28 @@ from .references import fit_panel_fe,spline_basis
 from .bootstrap import cluster_draw
 
 
+def capture_sensitivity(bundle,transitions=((20,50),(30,60),(40,70))):
+    """Within-person contrast with/without capture controls; not an APC solution."""
+    data=bundle.training_data
+    if not data:return pd.DataFrame()
+    unadjusted=data.get('f_coeff_unadjusted')
+    if unadjusted is None:
+        unadjusted,_=fit_panel_fe(data['c_age'],data['c_phi'],data['c_ids'],bundle.knots)
+    source=np.array([a for a,b in transitions]);target=np.array([b for a,b in transitions])
+    delta=spline_basis(np.clip(target,*bundle.support),bundle.knots)-spline_basis(np.clip(source,*bundle.support),bundle.knots)
+    adjusted=delta@bundle.f_coeff;raw=delta@unadjusted
+    rows=[]
+    for i,(a,b) in enumerate(transitions):
+        for j,name in enumerate(bundle.attributes):
+            valid=np.isfinite([adjusted[i,j],raw[i,j]]).all()
+            rows.append(dict(attribute=name,source_age=a,target_age=b,d_C_adjusted=adjusted[i,j],
+                d_C_unadjusted=raw[i,j],capture_adjustment=adjusted[i,j]-raw[i,j],
+                sign_changed=bool(valid and adjusted[i,j]*raw[i,j]<0),
+                extrapolated=bool(bundle.extrapolated([a],[b])[0]),
+                interpretation='Capture sensitivity, not proof of an age/period causal effect'))
+    return pd.DataFrame(rows)
+
+
 def describe_population_aging(bundle,transitions=((20,50),(30,60),(40,70)),n_boot=1000,seed=2026,output_dir=None):
     a=np.array([t[0] for t in transitions]);b=np.array([t[1] for t in transitions])
     dc=bundle.d_C(a,b);dp=bundle.d_P(a,b)
@@ -32,6 +54,7 @@ def describe_population_aging(bundle,transitions=((20,50),(30,60),(40,70)),n_boo
             lo,hi=np.nanpercentile(np.array(draws)[:,i,j],[2.5,97.5]) if draws else (np.nan,np.nan)
             rows.append(dict(attribute=attribute,source_age=source,target_age=target,d_C=dc[i,j],d_P=dp[i,j],
                 d_C_cross_sectional=cross[i,j],difference=dp[i,j]-dc[i,j],ci_low=lo,ci_high=hi,
+                reliability_age_supported=min(source,target)>= (bundle.metadata.get('reliability_policy',{}).get('retest_min_age') or 0),
                 extrapolated=bool(bundle.extrapolated([source],[target])[0])))
     corr=float(np.corrcoef(dc.ravel(),dp.ravel())[0,1])
     # Use actual training source deviations where available, rather than
@@ -49,6 +72,13 @@ def describe_population_aging(bundle,transitions=((20,50),(30,60),(40,70)),n_boo
         note='P is cross-sectional; inspect d_C_cross_sectional alongside longitudinal d_C. APC confounding remains.')
     root=Path(output_dir or bundle.metadata.get('config',{}).get('output_dir','outputs/aging_bias/references'))
     root.mkdir(parents=True,exist_ok=True);table=pd.DataFrame(rows)
+    sensitivity=capture_sensitivity(bundle,transitions)
+    if not sensitivity.empty:
+        sensitivity.to_csv(root/'capture_sensitivity.csv',index=False)
+        table=table.merge(sensitivity[['attribute','source_age','target_age','d_C_unadjusted','capture_adjustment','sign_changed']],
+            on=['attribute','source_age','target_age'],validate='one_to_one')
+        if sensitivity.sign_changed.any():
+            warnings.warn('Longitudinal contrast changes sign with capture adjustment; inspect capture_sensitivity.csv. APC confounding is not resolved.')
     table.to_csv(root/'population_contrasts.csv',index=False)
     (root/'identification.json').write_text(json.dumps(diagnostics,indent=2))
     import matplotlib.pyplot as plt

@@ -19,19 +19,23 @@ class BiasDecomposition:
     n_rows: int = 0
     cond_number: float = np.inf
     corr_dC_dP: float = np.nan
+    homog_status: str = 'same_as_structural_fit'
 
 
 def estimate_bias_decomposition(g, d_C, d_P, G_P, zeta, weights,
                                 attribute_mask=None, d_min=.10, max_cond=1e3, max_corr=.95,
-                                warn=True):
+                                warn=True,attribute_weights=None):
     arrays=[np.asarray(v,float) for v in (g,d_C,d_P,G_P,zeta)]
     if arrays[0].ndim!=2 or any(a.shape!=arrays[0].shape for a in arrays):
         raise ValueError('All feature arrays must share shape (pairs, attributes)')
     n,p=arrays[0].shape
+    aw=np.ones(p) if attribute_weights is None else np.asarray(attribute_weights,float)
+    if aw.shape!=(p,) or not np.isfinite(aw).all() or np.any(aw<0) or not np.any(aw>0):
+        raise ValueError('attribute_weights must be finite nonnegative attribute weights with positive mass')
     w=np.asarray(weights,float)
     if w.shape!=(n,) or not np.isfinite(w).all() or np.any(w<0) or w.sum()<=0:
         raise ValueError('weights must be finite nonnegative pair weights')
-    mask=np.logical_and.reduce([np.isfinite(a) for a in arrays]) & (w[:,None]>0)
+    mask=np.logical_and.reduce([np.isfinite(a) for a in arrays]) & (w[:,None]>0) & (aw[None,:]>0)
     if attribute_mask is not None:
         if np.shape(attribute_mask)!=(n,p): raise ValueError('attribute_mask shape mismatch')
         mask &= attribute_mask
@@ -43,7 +47,7 @@ def estimate_bias_decomposition(g, d_C, d_P, G_P, zeta, weights,
     active=np.unique(j)
     fe=(j[:,None]==active).astype(float)
     x=np.column_stack([fe,arrays[1][i,j],arrays[2][i,j],arrays[3][i,j],-arrays[4][i,j]])
-    root=np.sqrt(w[i]/w.sum()); xw=x*root[:,None]; yw=arrays[0][i,j]*root
+    root=np.sqrt(w[i]*aw[j]/w.sum()); xw=x*root[:,None]; yw=arrays[0][i,j]*root
     coef,_,rank,sv=np.linalg.lstsq(xw,yw,rcond=None)
     fit.cond_number=float(sv[0]/sv[-1]) if len(sv) and sv[-1]>0 else np.inf
     a,b=x[:,-4],x[:,-3]

@@ -69,6 +69,28 @@ def prepare_reference_backend(root='/content/evaluation_models_v2',*,feature_con
     return dict(feature_config=features,feature_backend=HandcraftedFeatureBackend(),landmark_backend=MediaPipeLandmarks(task))
 
 
+def prepare_embedding_reference_backend(reference_config,*,root='/content/evaluation_models_v2',
+                                        encoder=None,landmark_backend=None,allow_download=False):
+    """Explicit DINOv2 CPU setup and train/proxy PCA, safe to resume.
+
+    Leakage validation happens BEFORE constructing/downloading any model.
+    Call build_reference_bundle with the returned backends, as for handcrafted.
+    """
+    from src.aging_bias.references import load_colombia_manifest,load_ffhq_manifest
+    from src.aging_bias.embedding_features import DinoV2Encoder,fit_reference_embedding
+    config=reference_config
+    colombia=load_colombia_manifest(config)
+    proxy=load_ffhq_manifest(config.ffhq_aging_root,config.ffhq_labels_path,
+        config.ffhq_min_conf,config.ffhq_max_per_group,config.seed)
+    if landmark_backend is None:
+        prepared=prepare_reference_backend(root,feature_config=config.features,allow_download=allow_download)
+        landmark_backend=prepared['landmark_backend']
+    if encoder is None:
+        encoder=DinoV2Encoder(local_files_only=not allow_download,device='cpu',cache_dir=str(Path(root)/'huggingface'))
+    fitted=fit_reference_embedding(config,colombia,proxy,encoder,landmark_backend)
+    return dict(feature_config=config.features,feature_backend=fitted,landmark_backend=landmark_backend)
+
+
 def prepare_paper_bundle(root='/content/evaluation_models_v2',*,feature_config=None,
                          fairface_checkpoint_path=None,fairface_url=None,
                          allow_download=False,include_dex=True,include_kid=True,legacy_metrics_config=None):

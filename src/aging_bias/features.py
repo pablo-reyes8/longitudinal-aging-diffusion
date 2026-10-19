@@ -12,13 +12,15 @@ import pandas as pd
 from PIL import Image, ImageDraw
 from scipy.ndimage import gaussian_filter
 from src.quantitative_metrics.image_io import ImageResolver
-from .preprocessing import preprocess_image, is_grayscale
+from .preprocessing import preprocess_image, is_grayscale, normalize_local_illumination
 from .config import FeatureConfig
 
 ATTRIBUTE_IDS=('wrinkle_forehead','wrinkle_periocular','wrinkle_nasolabial','wrinkle_perioral',
     'skin_hf_texture','skin_ita','hair_gray','geom_jaw_sag','geom_lip_thickness',
     'geom_eye_aperture','geom_brow_eye','geom_lower_third')
 COLOR_ATTRIBUTES={'skin_ita','hair_gray'}
+EXPRESSION_ATTRIBUTES={'wrinkle_periocular','wrinkle_nasolabial','wrinkle_perioral',
+    'geom_eye_aperture','geom_lip_thickness','geom_brow_eye'}
 ATTRIBUTE_REGISTRY={k:dict(id=k,requires_color=k in COLOR_ATTRIBUTES,
     region=k.split('_',1)[-1]) for k in ATTRIBUTE_IDS}
 
@@ -81,7 +83,7 @@ def region_masks(shape,l):
 class HandcraftedFeatureBackend:
     cache_id='handcrafted-v1'
     attribute_ids=ATTRIBUTE_IDS
-    def extract_aligned(self,image,landmarks,allow_color=True):
+    def extract_aligned(self,image,landmarks,allow_color=True,*,normalize_color=False):
         rgb=np.asarray(image.convert('RGB'),float);gray=rgb@np.array([.2126,.7152,.0722])/255
         local_mean=gaussian_filter(gray,5)
         local_sd=np.sqrt(np.maximum(gaussian_filter((gray-local_mean)**2,5),0))
@@ -98,10 +100,11 @@ class HandcraftedFeatureBackend:
         if cheeks is not None and cheeks.sum()>=8:
             out['phi__skin_hf_texture']=float(np.var((contrast-gaussian_filter(contrast,1))[cheeks]))
         if allow_color and not is_grayscale(image):
-            if cheeks is not None and cheeks.any():out['phi__skin_ita']=ita_from_lab(rgb_to_lab(rgb)[cheeks])
+            color=normalize_local_illumination(rgb) if normalize_color else rgb
+            if cheeks is not None and cheeks.any():out['phi__skin_ita']=ita_from_lab(rgb_to_lab(color)[cheeks])
             hair=masks.get('hair')
             if hair is not None and hair.any():
-                val=rgb.max(-1)/255;sat=(rgb.max(-1)-rgb.min(-1))/np.maximum(rgb.max(-1),1)
+                val=color.max(-1)/255;sat=(color.max(-1)-color.min(-1))/np.maximum(color.max(-1),1)
                 out['phi__hair_gray']=float(np.mean((sat[hair]<.15)&(val[hair]>.55)))
         out.update({'phi__'+k:v for k,v in geometry_attributes(landmarks).items()})
         return out
@@ -132,7 +135,18 @@ class FeatureStore:
                 from .preprocessing import MediaPipeLandmarks
                 self.landmarks=MediaPipeLandmarks(self.config.landmark_model_path)
             prepared=preprocess_image(image,self.landmarks,self.config)
-            row={**self.backend.extract_aligned(prepared.image,prepared.landmarks),**prepared.covariates}
+            kwargs={'normalize_color':self.config.normalize_color_illumination} if isinstance(self.backend,HandcraftedFeatureBackend) else {}
+            ids=getattr(self.backend,'attribute_ids',())
+            reject=not prepared.covariates['pose_quality_ok'] or (not prepared.covariates['expression_quality_ok'] and
+                any(a.startswith('embedding_') for a in ids))
+            values={'phi__'+a:np.nan for a in ids} if reject and ids else self.backend.extract_aligned(prepared.image,prepared.landmarks,**kwargs)
+            row={**values,**prepared.covariates}
+        if not row.get('pose_quality_ok',True):
+            row.update({k:np.nan for k in row if k.startswith('phi__')})
+        elif not row.get('expression_quality_ok',True):
+            # For embeddings expression cannot be isolated to selected coordinates.
+            row.update({k:np.nan for k in row if k.startswith('phi__') and
+                (k[5:] in EXPRESSION_ATTRIBUTES or k[5:].startswith('embedding_'))})
         row={**row,'image_sha256':digest,'feature_config_hash':self.config_hash}
         temp=file.with_suffix('.tmp');temp.write_text(json.dumps(row,default=float,allow_nan=True));temp.replace(file)
         return row

@@ -10,9 +10,10 @@ def report_paper(output_dir):
     if len(indices):
         t=indices.query("panel=='common' and subset=='aging' and scheme=='bin_balanced'").copy()
         t.to_csv(tables/'table1_bias.csv',index=False)
-        cols=['model_name','D','pi','drift','homog','status']
+        homog='homog_excess' if 'homog_excess' in indices else 'homog'
+        cols=['model_name','D','pi','drift',homog,'status']
         rendered=t[cols].copy()
-        for k in ['D','pi','drift','homog']:
+        for k in ['D','pi','drift',homog]:
             rendered[k]=[f'{v:.3f} [{lo:.3f}, {hi:.3f}]' if np.isfinite(v) else '--'
                 for v,lo,hi in zip(t[k],t[k+'_ci_low'],t[k+'_ci_high'])]
         (tables/'table1_bias.tex').write_text(rendered.to_latex(index=False,escape=True))
@@ -21,7 +22,7 @@ def report_paper(output_dir):
             view=view[view.subset==subset].copy()
             view.to_csv(tables/f'table1_bias_{subset}.csv',index=False)
             formatted=view[cols].copy()
-            for k in ['D','pi','drift','homog']:
+            for k in ['D','pi','drift',homog]:
                 formatted[k]=[f'{v:.3f} [{lo:.3f}, {hi:.3f}]' if np.isfinite(v) else '--'
                     for v,lo,hi in zip(view[k],view[k+'_ci_low'],view[k+'_ci_high'])]
             (tables/f'table1_bias_{subset}.tex').write_text(formatted.to_latex(index=False,escape=True))
@@ -71,6 +72,10 @@ def plot_sd15_before_after(evaluation_dir,output_dir=None,matched_d=(.3,.5,.7)):
     """Interpolate only inside observed D support; never extrapolate a match."""
     root=Path(evaluation_dir);out=Path(output_dir or root);out.mkdir(exist_ok=True,parents=True)
     df=pd.read_csv(root/'bias_indices.csv').query("panel=='common' and subset=='aging' and scheme=='bin_balanced'")
+    # New reference policies report noise-calibrated homogenization everywhere,
+    # including SD1.5 plots. Raw estimates remain in bias_indices.csv.
+    if 'homog_excess' in df:
+        for suffix in ['', '_ci_low', '_ci_high']:df['homog'+suffix]=df['homog_excess'+suffix]
     import matplotlib.pyplot as plt
     fig,axes=plt.subplots(1,4,figsize=(17,4));matches=[]
     for prefix,label in [('SD15_vanilla@','vanilla'),('ours@','finetuned')]:

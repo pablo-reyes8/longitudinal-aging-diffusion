@@ -6,14 +6,13 @@ models does not make conclusions immune to reference misspecification.
 """
 from dataclasses import dataclass,field,asdict
 from datetime import datetime,timezone
-from itertools import combinations
 from pathlib import Path
 import json
 import warnings
 import numpy as np
 import pandas as pd
 from .features import FeatureStore
-from .reliability import reliability_table
+from .reliability import reference_reliability
 
 CAPTURE=('is_grayscale','log_min_side','blur_laplacian_var')
 
@@ -185,6 +184,7 @@ def fit_reference_frames(colombia,proxy,attributes,knots,mean,sd,icc,feature_con
     q=colombia.reindex(columns=CAPTURE,fill_value=0).to_numpy(float)
     age=colombia.age.to_numpy(float);ids=colombia.identity_id.astype(str).to_numpy()
     coef,capture=fit_panel_fe(age,cv,ids,knots,q)
+    unadjusted,_=fit_panel_fe(age,cv,ids,knots)
     mu=np.full_like(coef,np.nan)
     for j in range(len(attributes)):
         valid=np.isfinite(cv[:,j])&np.isfinite(q).all(1)
@@ -195,6 +195,7 @@ def fit_reference_frames(colombia,proxy,attributes,knots,mean,sd,icc,feature_con
     return ReferenceBundle(np.asarray(knots,float),coef,mu,p_age,p_mu,np.asarray(mean),np.asarray(sd),
         list(attributes),np.asarray(icc),feature_config_hash,(max(float(age.min()),float(knots[0])),min(float(age.max()),float(knots[-1]))),
             metadata=metadata or {},training_data=dict(c_age=age,c_phi=cv,c_ids=ids,c_capture=q,
+            capture_coef=capture,f_coeff_unadjusted=unadjusted,
             p_age=proxy.age.to_numpy(float),p_phi=pv))
 
 
@@ -220,21 +221,47 @@ def build_reference_bundle(config,*,feature_backend=None,landmark_backend=None):
     pd.DataFrame(cf+pf,columns=['identity_id','image_path','age','error']).to_csv(root/'reference_failures.csv',index=False)
     if c.empty or p.empty:raise ValueError('No reference features extracted; inspect reference_failures.csv and landmark backend')
     attrs=[k[5:] for k in c if k.startswith('phi__')]
-    repeats={k:[] for k in attrs}
-    for _,group in c.groupby('identity_id'):
-        for a,b in combinations(group.to_dict('records'),2):
-            if abs(float(a['age'])-float(b['age']))<=1 and a['image_sha256']!=b['image_sha256']:
-                for k in attrs:repeats[k].append([a['phi__'+k],b['phi__'+k]])
-    reliability=reliability_table(repeats,config.min_icc,config.min_retest_pairs)
+    quality=[]
+    for population,frame in [('colombia_train',c),('ffhq_proxy',p)]:
+        phi=frame[['phi__'+a for a in attrs]]
+        quality.append(dict(population=population,n_extracted=len(frame),
+            n_pose_excluded=int(frame.get('pose_quality_ok',pd.Series(True,index=frame.index)).eq(False).sum()),
+            n_expression_flagged=int(frame.get('expression_quality_ok',pd.Series(True,index=frame.index)).eq(False).sum()),
+            n_with_any_attributes=int(phi.notna().any(axis=1).sum()),
+            n_with_all_attributes=int(phi.notna().all(axis=1).sum()),
+            n_grayscale=int(frame.get('is_grayscale',pd.Series(False,index=frame.index)).sum()),
+            n_adult_images=int(frame.age.ge(config.retest_min_age or 0).sum())))
+    pd.DataFrame(quality).to_csv(root/'reference_quality.csv',index=False)
+    reliability=reference_reliability(c,attrs,config)
     sd=c[['phi__'+k for k in attrs]].std(ddof=1).to_numpy(float)
-    reliability.loc[~np.isfinite(sd)|(sd<=1e-12),'active']=False
+    invalid=~np.isfinite(sd)|(sd<=1e-12)
+    reliability.loc[invalid,['active','active_pi','active_homog']]=False
+    reliability.loc[invalid,'attribute_weight']=0.
+    reliability.loc[invalid,'exclusion_reason']='nonvariable_attribute'
+    # A reliable train descriptor may have no measurements in a proxy age bin
+    # (e.g. only grayscale photos). Exclude explicitly rather than crash later
+    # or fill unknown color attributes with zero.
+    proxy_means=p.groupby('age')[['phi__'+a for a in attrs]].mean()
+    unavailable=~np.isfinite(proxy_means.to_numpy()).all(axis=0)
+    reliability.loc[unavailable,['active','active_pi','active_homog']]=False
+    reliability.loc[unavailable,'attribute_weight']=0.
+    reliability.loc[unavailable,'exclusion_reason']='missing_proxy_age_group'
     reliability.to_csv(root/'attribute_reliability.csv',index=False)
     active=reliability[reliability.active]
-    if active.empty:raise ValueError('No reliable variable attributes: need distinct near-age repeat photos in TRAIN; inspect attribute_reliability.csv')
+    if active.empty:raise ValueError('No active reference attributes: inspect attribute_reliability.csv and reference_quality.csv for adult retests, ICC, variation and proxy support. No threshold or age fallback was applied.')
     attrs=active.attribute.tolist();columns=['phi__'+k for k in attrs]
     bundle=fit_reference_frames(c,p,attrs,config.knots,c[columns].mean().to_numpy(),c[columns].std().to_numpy(),
         active.icc.to_numpy(),store.config_hash,dict(config=asdict(config),train_identities=sorted(c.identity_id.astype(str).unique()),
-            proxy='FFHQ-Aging (not a demographic nationality label)',age_period_cohort_limitation=True))
+            proxy='FFHQ-Aging (not a demographic nationality label)',age_period_cohort_limitation=True,
+            reliability_policy=dict(weight_by_icc=config.weight_attributes_by_icc,
+                min_icc_pi=config.min_icc,min_icc_homog=config.min_homog_icc,
+                retest_min_age=config.retest_min_age,
+                active_homog=active.active_homog.tolist(),
+                attribute_weights=active.attribute_weight.tolist(),
+                homogenization='excess_over_oracle' if config.min_homog_icc is not None else 'raw'),
+            measurement_caveats=['Adult reliability is not evidence of reliability in children.',
+                'Local illumination correction does not identify global exposure or white balance.',
+                'ICC weighting does not remove measurement error in regressors or capture confounding.']))
     if config.use_sex:
         if 'gender' not in c or 'gender' not in p:
             warnings.warn('Sex labels unavailable in train/proxy: using pooled references, no inferred labels')
@@ -248,4 +275,7 @@ def build_reference_bundle(config,*,feature_backend=None,landmark_backend=None):
                     bundle.icc,store.config_hash,dict(sex=sex,standardization='pooled Colombian train'))
             bundle.metadata['sex_strata']=list(bundle.strata)
     bundle.save(root);c.to_parquet(root/'train_features.parquet',index=False);p.to_parquet(root/'proxy_features.parquet',index=False)
+    coefficients=bundle.training_data['capture_coef']
+    pd.DataFrame([dict(attribute=a,covariate=key,coefficient=coefficients[i,j])
+        for j,a in enumerate(attrs) for i,key in enumerate(CAPTURE)]).to_csv(root/'capture_coefficients.csv',index=False)
     return bundle

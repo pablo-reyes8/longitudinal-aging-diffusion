@@ -10,7 +10,7 @@ import pandas as pd
 from src.aging_bias.features import FeatureStore,COLOR_ATTRIBUTES,stable_hash
 from src.aging_bias.references import ReferenceBundle
 from src.aging_bias.weighting import transition_weights
-from src.aging_bias.bootstrap import bootstrap_models
+from src.aging_bias.bootstrap import bootstrap_models,calibrate_homogenization
 from src.aging_bias.validation import run_self_checks,validate_real_anchors
 from src.quantitative_metrics.image_io import ImageResolver
 from src.quantitative_metrics.evaluator import _cosine,_git_commit,_safe_version
@@ -142,6 +142,7 @@ def evaluate_paper_v2(config,*,bundle,reference_bundle=None):
     checks=run_self_checks(output/'validation')
     if not checks.passed.all():raise RuntimeError('Synthetic self-checks failed; evaluation stopped before any network execution')
     ref=reference_bundle or ReferenceBundle.load(config.reference_bundle_path)
+    policy=ref.metadata.get('reliability_policy',{})
     panel=load_test_panel(config.test_manifest_path,config.source_root)
     for direction in ['all','aging','rejuvenation']:
         subset=panel if direction=='all' else panel[panel.delta_age>0] if direction=='aging' else panel[panel.delta_age<0]
@@ -204,6 +205,9 @@ def evaluate_paper_v2(config,*,bundle,reference_bundle=None):
                 'reference_sex_fallback':bool(ref.strata and sample.get('gender') not in ref.strata)}
             row.update(source_sha256=fs.get('image_sha256') if fs else None,
                 target_sha256=ft.get('image_sha256') if ft else None,generated_sha256=fg.get('image_sha256') if fg else None)
+            reliability_age=policy.get('retest_min_age')
+            row['reliability_age_supported']=bool(reliability_age is None or
+                min(sample['source_age'],sample['target_age'])>=reliability_age)
             for k in ['adaface_id_source','adaface_id_gt','delta_id_gain','age_rel_err_indep','age_rel_signed_indep','dex_age_mae']:row[k]=np.nan
             if os is not None and ot is not None and og is not None:
                 row.update(independent_age_source=os['independent_age'],independent_age_target=ot['independent_age'],
@@ -236,6 +240,14 @@ def evaluate_paper_v2(config,*,bundle,reference_bundle=None):
     all_indices=[];all_bybin=[];paired=[];ops=[];anchor_indices=[]
     panels=[('common',per[per.in_common_panel])]+[(f'full:{m}',per[(per.model_name==m)&per.feature_valid]) for m in models]
     fit_opts=dict(d_min=config.d_min,max_cond=config.max_cond,max_corr=config.max_corr)
+    if policy.get('weight_by_icc'):
+        fit_opts['attribute_weights']=policy.get('attribute_weights',ref.icc)
+    if policy.get('min_icc_homog') is not None or 'active_homog' in policy:
+        fit_opts['homogenization_mask']=policy['active_homog']
+    def calibrated(result):
+        if policy.get('homogenization')=='excess_over_oracle':
+            result['indices']=calibrate_homogenization(result['indices'],result['draws'])
+        return result
     for panel_name,frame in panels:
         for subset in ['all','aging','rejuvenation']:
             sub=frame if subset=='all' else frame[frame.direction==subset]
@@ -245,7 +257,7 @@ def evaluate_paper_v2(config,*,bundle,reference_bundle=None):
             base=sub[sub.model_name==names[0]].reset_index(drop=True)
             weights=transition_weights(base,config.weighting)
             arrays={m:_arrays(sub[sub.model_name==m].set_index('sample_id').loc[base.sample_id].reset_index(),ref.attributes) for m in names}
-            result=bootstrap_models(base,arrays,config.weighting,n_boot=config.n_boot if panel_name=='common' else 0,seed=config.seed,**fit_opts)
+            result=calibrated(bootstrap_models(base,arrays,config.weighting,n_boot=config.n_boot if panel_name=='common' else 0,seed=config.seed,**fit_opts))
             idx=result['indices'].assign(panel=panel_name,subset=subset,
                 weighting_merges=json.dumps(result['weights'].attrs['merges']))
             anchor_indices.append(idx[idx.model_name.isin(['source_noedit','oracle_target'])])
@@ -265,8 +277,8 @@ def evaluate_paper_v2(config,*,bundle,reference_bundle=None):
                 ops+=_operational_summary(aligned,weights,m,subset,panel_name)
             for label,group in weights.groupby('delta_bin',sort=False):
                 ix=group.index.to_numpy();binconfig=replace(config.weighting,operational_target=None,scheme_primary='bin_balanced')
-                br=bootstrap_models(base.iloc[ix].reset_index(drop=True),{m:{k:v[ix] for k,v in a.items()} for m,a in arrays.items()},
-                    binconfig,n_boot=config.n_boot if panel_name=='common' else 0,seed=config.seed,**fit_opts)
+                br=calibrated(bootstrap_models(base.iloc[ix].reset_index(drop=True),{m:{k:v[ix] for k,v in a.items()} for m,a in arrays.items()},
+                    binconfig,n_boot=config.n_boot if panel_name=='common' else 0,seed=config.seed,**fit_opts))
                 all_bybin.append(br['indices'].query("model_name!='oracle_target'").assign(panel=panel_name,subset=subset,delta_bin=label,
                     n_identities=group.identity_id.nunique(),n_bin_pairs=len(group)))
                 bw=transition_weights(base.iloc[ix].reset_index(drop=True),binconfig)
@@ -282,7 +294,10 @@ def evaluate_paper_v2(config,*,bundle,reference_bundle=None):
     bybin=pd.concat(all_bybin,ignore_index=True) if all_bybin else pd.DataFrame(columns=index_columns+['delta_bin'])
     contrasts=pd.concat(paired,ignore_index=True) if paired else pd.DataFrame(columns=['model_a','model_b','index_name','difference','ci_low','ci_high','share_ok'])
     anchor=pd.concat(anchor_indices,ignore_index=True) if anchor_indices else pd.DataFrame(columns=['scheme','subset'])
-    anchors=validate_real_anchors(anchor,1-float(np.mean(ref.icc)),config.oracle_d_bounds,config.oracle_ratio_tolerance,config.oracle_homog_tolerance)
+    reliable=np.asarray(policy.get('active_homog',np.ones(len(ref.icc),bool)),bool)
+    reliability_weights=np.asarray(policy.get('attribute_weights',ref.icc),float) if policy.get('weight_by_icc') else np.ones(len(ref.icc))
+    noise_share=float(np.average(1-ref.icc[reliable],weights=reliability_weights[reliable])) if reliable.any() else np.nan
+    anchors=validate_real_anchors(anchor,noise_share,config.oracle_d_bounds,config.oracle_ratio_tolerance,config.oracle_homog_tolerance)
     if not anchors['passed']:warnings.warn('REAL ANCHORS FAILED: do not interpret bias ratios or start SD1.5 counterfactual; inspect validation/real_anchors.json')
     (output/'validation'/'real_anchors.json').write_text(json.dumps(anchors,indent=2,allow_nan=True))
     anchor.to_csv(output/'validation'/'oracle_indices.csv',index=False)
@@ -309,13 +324,16 @@ def evaluate_paper_v2(config,*,bundle,reference_bundle=None):
     operations=operations[operations.model_name.ne('oracle_target')].reset_index(drop=True)
     # Content signature: moving outputs does not invalidate descriptors.
     refhash=stable_hash(dict(feature=ref.feature_config_hash,knots=ref.knots.tolist(),f=ref.f_coeff.tolist(),
-        c=ref.mu_c.tolist(),p=ref.mu_p.tolist(),mean=ref.mean.tolist(),sd=ref.sd.tolist(),icc=ref.icc.tolist()))
+        c=ref.mu_c.tolist(),p=ref.mu_p.tolist(),mean=ref.mean.tolist(),sd=ref.sd.tolist(),icc=ref.icc.tolist(),
+        reliability_policy=policy))
     metadata=dict(config=asdict(config),n_requested_pairs=len(panel),n_common_pairs=len(common),n_common_identities=panel[panel.sample_id.isin(common)].identity_id.nunique(),
         feature_config_hash=store.config_hash,reference_hash=refhash,operational_hash=operational.signature,
         critic_provenance=CRITIC_PROVENANCE,git_commit=_git_commit(),python=platform.python_version(),
         versions={k:_safe_version(k) for k in ['numpy','pandas','scipy','mediapipe','torch']},
         weighting_merges=transition_weights(panel,config.weighting).attrs['merges'],seed=config.seed,
-        ci_scope='identity bootstrap conditional on fitted references; not joint reference uncertainty',anchors_passed=anchors['passed'])
+        ci_scope='identity bootstrap conditional on fitted references; not joint reference uncertainty',anchors_passed=anchors['passed'],
+        reliability_policy=policy,
+        n_pairs_outside_reliability_age=int(per.drop_duplicates('sample_id').reliability_age_supported.eq(False).sum()))
     per.to_parquet(output/'per_sample.parquet',index=False)
     per.to_csv(output/'per_sample.csv',index=False)
     for name,df in [('bias_indices',indices),('bias_indices_by_bin',bybin),('paired_differences',contrasts),('operational_metrics',operations),('failures',failures),('kid_metrics',pd.DataFrame(kid_rows))]:df.to_csv(output/(name+'.csv'),index=False)
