@@ -21,6 +21,24 @@ No usa el bundle de difusión como evaluador. Para nuevas generaciones de
 literatura se mantiene `load_aging_models(..., load_metrics=False)` y sus
 sesiones residentes existentes. No se cambia ninguna firma legacy.
 
+### Variantes picking
+
+El notebook compara `ours_strength_0.31` existente y dos salidas separadas:
+`ours_picking_no_prompt`, `ours_picking_prompt`. Se generan explícitamente con
+`run_picking_variants(PickingVariantsConfig(...), bundle=inference_bundle)`.
+Este bundle lleva ArcFace/MiVOLO, no FairFace/AdaFace de evaluación. La búsqueda
+usa el smart sweep existente, rango [0.04,0.45], hasta 10 candidatos base y una
+imagen asistida adicional con el strength/CFG ganador. No es una segunda
+búsqueda independiente de strength; ambas variantes se guardan aunque los
+prompts empeoren el resultado. La configuración positiva/negativa es editable.
+Se mantiene una sola residencia GPU por corrida y caché PNG+JSON por variante.
+La versión fija se reutiliza sin modificar: revisar sus pasos/semilla al
+comparar protocolos históricos con la nueva configuración de 40 pasos.
+
+Tablas 1, 2 y A1 se exportan además con sufijos `_all` (aging + rejuvenation)
+y `_aging` (solo aging), para todos los modelos/variantes. KID también se
+calcula por separado en ambos paneles; no se copia el KID global al de aging.
+
 ## Archivos
 
 - `per_sample.parquet` y copia CSV: atributos estandarizados, componentes de

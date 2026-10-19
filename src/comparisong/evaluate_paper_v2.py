@@ -290,17 +290,19 @@ def evaluate_paper_v2(config,*,bundle,reference_bundle=None):
     if config.include_kid:
         resolver=ImageResolver()
         for m in models+['source_noedit']:
-            f=per[(per.model_name==m)&per.in_common_panel]
-            mean=std=np.nan;status='insufficient_samples'
-            if len(f)>=2:
-                try:
-                    real=[resolver.load(p)[0] for p in f.target_path];gen=[resolver.load(p)[0] for p in f.generated_path]
-                    mean,std=bundle['kid_metric'].compute(real,gen,seed=config.seed,subset_size=min(50,len(f)))
-                    status='ok'
-                except Exception as exc:
-                    status='backend_error';failures.append(dict(model_name=m,stage='kid',error=str(exc)))
-            kid_rows.append(dict(model_name=m,kid_mean=mean,kid_std=std,kid_status=status,n_kid=len(f),panel='common'))
-            resolver._cache.clear()
+            for subset in ['all','aging']:
+                f=per[(per.model_name==m)&per.in_common_panel]
+                if subset=='aging':f=f[f.delta_age>0]
+                mean=std=np.nan;status='insufficient_samples'
+                if len(f)>=2:
+                    try:
+                        real=[resolver.load(p)[0] for p in f.target_path];gen=[resolver.load(p)[0] for p in f.generated_path]
+                        mean,std=bundle['kid_metric'].compute(real,gen,seed=config.seed,subset_size=min(50,len(f)))
+                        status='ok'
+                    except Exception as exc:
+                        status='backend_error';failures.append(dict(model_name=m,stage='kid',error=f'{subset}: {exc}'))
+                kid_rows.append(dict(model_name=m,subset=subset,kid_mean=mean,kid_std=std,kid_status=status,n_kid=len(f),panel='common'))
+                resolver._cache.clear()
     failures=pd.DataFrame(failures,columns=['sample_id','model_name','stage','path','error'])
     operations=pd.DataFrame(ops) if ops else pd.DataFrame(columns=['model_name','scheme','subset','panel','delta_bin'])
     operations[operations.model_name.eq('oracle_target')].to_csv(output/'validation'/'oracle_operational_metrics.csv',index=False)

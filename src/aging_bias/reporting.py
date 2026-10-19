@@ -16,19 +16,42 @@ def report_paper(output_dir):
             rendered[k]=[f'{v:.3f} [{lo:.3f}, {hi:.3f}]' if np.isfinite(v) else '--'
                 for v,lo,hi in zip(t[k],t[k+'_ci_low'],t[k+'_ci_high'])]
         (tables/'table1_bias.tex').write_text(rendered.to_latex(index=False,escape=True))
+        for subset in ['all','aging']:
+            view=indices.query("panel=='common' and scheme=='bin_balanced'")
+            view=view[view.subset==subset].copy()
+            view.to_csv(tables/f'table1_bias_{subset}.csv',index=False)
+            formatted=view[cols].copy()
+            for k in ['D','pi','drift','homog']:
+                formatted[k]=[f'{v:.3f} [{lo:.3f}, {hi:.3f}]' if np.isfinite(v) else '--'
+                    for v,lo,hi in zip(view[k],view[k+'_ci_low'],view[k+'_ci_high'])]
+            (tables/f'table1_bias_{subset}.tex').write_text(formatted.to_latex(index=False,escape=True))
     if len(ops):
         ops.query("model_name!='oracle_target'").to_csv(tables/'table2_operational.csv',index=False)
         t=ops.query("panel=='common' and subset=='aging' and delta_bin=='all' and model_name!='oracle_target'")
         (tables/'table2_operational.tex').write_text(t.to_latex(index=False,float_format='%.4f'))
-        appendix=ops.query("panel=='common' and subset=='all' and scheme=='unweighted' and delta_bin=='all' and model_name!='oracle_target'").copy()
+        for subset in ['all','aging']:
+            view=ops.query("panel=='common' and delta_bin=='all' and model_name!='oracle_target'")
+            view=view[view.subset==subset]
+            view.to_csv(tables/f'table2_operational_{subset}.csv',index=False)
+            (tables/f'table2_operational_{subset}.tex').write_text(view.to_latex(index=False,float_format='%.4f'))
         flags=pd.read_parquet(root/'per_sample.parquet').groupby('model_name')[['metric_contaminated__dex_age_mae','critic_provenance_unknown']].first()
-        appendix=appendix.merge(flags,on='model_name',how='left')
         kid=root/'kid_metrics.csv'
+        kid_frame=pd.DataFrame()
         if kid.exists():
-            try:appendix=appendix.merge(pd.read_csv(kid).drop(columns='panel',errors='ignore'),on='model_name',how='left')
+            try:kid_frame=pd.read_csv(kid).drop(columns='panel',errors='ignore')
             except pd.errors.EmptyDataError:pass
-        appendix.to_csv(tables/'tableA1_legacy.csv',index=False)
-        (tables/'tableA1_legacy.tex').write_text(appendix.to_latex(index=False,float_format='%.4f'))
+        for subset in ['all','aging']:
+            appendix=ops.query("panel=='common' and scheme=='unweighted' and delta_bin=='all' and model_name!='oracle_target'").copy()
+            appendix=appendix[appendix.subset==subset].merge(flags,on='model_name',how='left')
+            if not kid_frame.empty:
+                if 'subset' in kid_frame:
+                    appendix=appendix.merge(kid_frame[kid_frame.subset==subset],on=['model_name','subset'],how='left')
+                elif subset=='all':appendix=appendix.merge(kid_frame,on='model_name',how='left')
+            appendix.to_csv(tables/f'tableA1_legacy_{subset}.csv',index=False)
+            (tables/f'tableA1_legacy_{subset}.tex').write_text(appendix.to_latex(index=False,float_format='%.4f'))
+            if subset=='all':
+                appendix.to_csv(tables/'tableA1_legacy.csv',index=False)
+                (tables/'tableA1_legacy.tex').write_text(appendix.to_latex(index=False,float_format='%.4f'))
     bins=pd.read_csv(root/'bias_indices_by_bin.csv')
     if len(bins):
         import matplotlib.pyplot as plt
