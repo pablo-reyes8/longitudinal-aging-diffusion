@@ -1,5 +1,7 @@
 """Separate base/assisted smart-sweep outputs for paper v2; legacy APIs unchanged."""
 from dataclasses import dataclass,field,asdict
+from copy import deepcopy
+from collections.abc import Mapping
 from pathlib import Path
 import json
 import shutil
@@ -12,9 +14,12 @@ from src.quantitative_metrics.image_io import ImageResolver
 from .evaluate_paper_v2 import load_test_panel
 from .evaluation_backends_v2 import file_hash
 
+MOUTH_POSITIVE_TERMS=('preserve mouth shape','preserve original mouth opening','preserve natural teeth visibility')
+MOUTH_NEGATIVE_TERMS=('malformed mouth','distorted lips','deformed teeth','extra teeth')
+
 
 def default_prompt_assistance():
-    return dict(positive_global_terms=[],negative_global_terms=[],use_mouth_rules=True,
+    return dict(positive_global_terms=list(MOUTH_POSITIVE_TERMS),negative_global_terms=list(MOUTH_NEGATIVE_TERMS),use_mouth_rules=True,
         use_eye_rules=True,use_expression_rules=False,
         closed_mouth_positive_terms=['keep lips closed','preserve mouth shape'],
         closed_mouth_negative_terms=['open mouth','visible teeth'],
@@ -22,12 +27,37 @@ def default_prompt_assistance():
         visible_teeth_negative_terms=['deformed teeth','extra teeth'],
         eye_positive_terms=['preserve eye shape','preserve gaze direction','natural eyes'],
         eye_negative_terms=['deformed eyes','asymmetric eyes','dark hollow eyes'],
-        max_support_terms_per_block=4)
+        max_support_terms_per_block=10)
+
+
+def protected_prompt_assistance(config=None):
+    """Always include state-neutral mouth protection in the assisted variant.
+
+    Never guess closed/open mouth and never require a landmark classifier.
+    Mandatory terms precede custom terms and reserve sufficient prompt budget
+    so the inference prompt builder cannot silently discard mouth protection.
+    """
+    if config is not None and not isinstance(config,Mapping):
+        raise ValueError('prompt_assistance_config must be a mapping')
+    result=deepcopy(default_prompt_assistance() if config is None else dict(config))
+    for flag in ['enabled','append_positive_support_prompt','append_negative_prompt']:
+        if result.get(flag,True) is not True:
+            raise ValueError(f'{flag} must be True for the mouth-protected prompt comparison')
+    for key,required in [('positive_global_terms',MOUTH_POSITIVE_TERMS),('negative_global_terms',MOUTH_NEGATIVE_TERMS)]:
+        terms=result.get(key,[])
+        if not isinstance(terms,(list,tuple)) or any(not isinstance(v,str) or not v.strip() for v in terms):
+            raise ValueError(f'{key} must contain non-empty strings')
+        result[key]=list(dict.fromkeys([*required,*terms]))
+    limit=result.get('max_support_terms_per_block',10)
+    if isinstance(limit,bool) or not isinstance(limit,int) or limit<1:
+        raise ValueError('max_support_terms_per_block must be a positive integer')
+    result['max_support_terms_per_block']=max(10,limit)
+    return result
 
 
 def default_delta_age_strength_map():
     """Prespecified starting heuristic, not a calibrated optimum or final strength."""
-    return {0:.15,10:.15,20:.22,30:.29,40:.33,60:.40}
+    return {0:.04,10:.15,20:.22,30:.23,40:.29,60:.30}
 
 
 @dataclass
@@ -67,6 +97,9 @@ class PickingVariantsConfig:
     # Appended to preserve positional compatibility; explicit old target maps
     # remain supported, but the benchmark notebook uses this gap-based policy.
     delta_age_strength_map: dict = field(default_factory=default_delta_age_strength_map)
+    # Force regeneration at the same output paths, even with resume=True.
+    # Set False explicitly to reuse compatible completed transitions.
+    overwrite: bool = True
 
 
 def initial_strength_for_transition(source_age,target_age,config):
@@ -106,8 +139,11 @@ def run_picking_variants(config,*,bundle,sweep_backend=None):
     worse. MiVOLO/ArcFace are selection auxiliaries, NOT the v2 evaluators.
     Bundle must be the already prepared inference bundle, not FairFace metrics.
     No model download/loading happens here. Residency spans all transitions.
+    By default existing outputs are backed up to stale/ and replaced. Only
+    overwrite=False together with resume=True enables cached-image reuse.
     """
     if not 0<config.min_strength<=config.max_strength<=1:raise ValueError('Invalid picking strength bounds')
+    if not isinstance(config.overwrite,bool):raise ValueError('overwrite must be a boolean')
     if isinstance(config.max_trials_per_target,bool) or not isinstance(config.max_trials_per_target,int) or not 1<=config.max_trials_per_target<=20:
         raise ValueError('max_trials_per_target must be an integer in [1,20]')
     if bundle.get('unet') is None or bundle.get('identity_encoder') is None or bundle.get('age_estimator') is None:
@@ -119,11 +155,17 @@ def run_picking_variants(config,*,bundle,sweep_backend=None):
     names={'ours_picking_no_prompt':('selected_results',None),'ours_picking_prompt':('assisted_results','assisted')}
     roots={name:str(output/'generated'/name) for name in names}
     params=asdict(config)
-    for key in ['checkpoint_path','test_manifest_path','output_dir','source_root','resume','retry_failed','device']:params.pop(key)
-    signature=stable_hash(dict(config=params,checkpoint_sha256=file_hash(config.checkpoint_path),version='paired-smart-prompts-v2-delta-start'))
+    for key in ['checkpoint_path','test_manifest_path','output_dir','source_root','resume','retry_failed','device','overwrite']:params.pop(key)
+    params['prompt_assistance_config']=protected_prompt_assistance(config.prompt_assistance_config)
+    # Protection is unconditional and state-neutral, not a nonexistent auto classifier.
+    params['source_mouth_state']='unknown'
+    params['source_expression_state']='unknown'
+    signature=stable_hash(dict(config=params,checkpoint_sha256=file_hash(config.checkpoint_path),version='paired-smart-prompts-v3-mouth-always'))
     params.pop('delta_age_strength_map')  # Internal benchmark policy, not a sweep argument.
     resolver=ImageResolver();rows=[];failures=[];active=False
     previous_reuse=bundle.get('_reuse_loaded_checkpoint',False)
+    print('[ours picking variants] Mouth/teeth protection always enabled; preserving source mouth opening, no classifier required.',flush=True)
+    if config.overwrite:print('[ours picking variants] overwrite=True: replacing existing outputs; backups in stale/.',flush=True)
     def persist():
         pd.DataFrame(rows).to_csv(output/'prediction_manifest.csv',index=False)
         pd.DataFrame(failures,columns=[*panel.columns,'model_name','generated_path','inference_status','inference_error']).to_csv(output/'inference_failures.csv',index=False)
@@ -153,7 +195,7 @@ def run_picking_variants(config,*,bundle,sweep_backend=None):
                 path=Path(roots[name])/sample['identity_id']/(sample['sample_id']+'.png');marker=path.with_suffix('.json')
                 row=dict(sample,model_name=name,generated_path=str(path),inference_status='ok')
                 cached=None;valid=False
-                if config.resume and marker.exists():
+                if config.resume and not config.overwrite and marker.exists():
                     try:cached=json.loads(marker.read_text())
                     except (ValueError,OSError):pass
                 if cached and cached.get('signature')==key and cached.get('status')!='failed':
@@ -208,5 +250,6 @@ def run_picking_variants(config,*,bundle,sweep_backend=None):
                 module=bundle.get(name)
                 if hasattr(module,'to'):module.to('cpu')
     persist();panel.to_csv(output/'transitions.csv',index=False)
-    (output/'run_config.json').write_text(json.dumps(dict(signature=signature,config=asdict(config)),default=str,indent=2))
+    (output/'run_config.json').write_text(json.dumps(dict(signature=signature,config=asdict(config),
+        effective_prompt_assistance_config=params['prompt_assistance_config'],mouth_protection='always_on_state_neutral'),default=str,indent=2))
     return dict(manifest=pd.DataFrame(rows),generated_roots=roots,failures=pd.DataFrame(failures))

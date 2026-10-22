@@ -23,7 +23,7 @@ def test_smart_variants_keep_prompt_even_when_worse_and_resume(tmp_path):
         def __init__(self):self.placements=[]
         def to(self,d):self.placements.append(d);return self
     module=Module();bundle=dict(unet=module,identity_encoder=object(),age_estimator=object())
-    cfg=PickingVariantsConfig(checkpoint,panel,tmp_path/'out',device='cpu',target_age_strength_map={50:.27})
+    cfg=PickingVariantsConfig(checkpoint,panel,tmp_path/'out',device='cpu',target_age_strength_map={50:.27},overwrite=False)
     result=run_picking_variants(cfg,bundle=bundle,sweep_backend=sweep)
     assert len(calls)==1
     assert calls[0]['min_strength']==.04 and calls[0]['max_strength']==.45
@@ -44,7 +44,7 @@ def test_smart_variants_keep_prompt_even_when_worse_and_resume(tmp_path):
 def test_default_picking_start_depends_on_gap_not_absolute_target_and_resumes(tmp_path):
     from src.comparisong.picking_variants import PickingVariantsConfig,run_picking_variants
     source=tmp_path/'source.png';Image.new('RGB',(16,16)).save(source)
-    pairs=[(38,43,.15),(38,68,.29),(18,48,.29),(68,38,.29)]
+    pairs=[(38,43,.095),(38,68,.23),(18,48,.23),(68,38,.23)]
     panel=tmp_path/'panel.csv'
     pd.DataFrame([dict(sample_id=f'p{i}',identity_id='id_1',source_path=str(source),target_path=str(source),
         source_age=a,target_age=b) for i,(a,b,_) in enumerate(pairs)]).to_csv(panel,index=False)
@@ -59,10 +59,10 @@ def test_default_picking_start_depends_on_gap_not_absolute_target_and_resumes(tm
         frame.attrs['assisted_results']=[{'image':Image.new('RGB',(16,16))}]
         frame.attrs['assisted']=frame.copy()
         return frame
-    config=PickingVariantsConfig(checkpoint,panel,tmp_path/'out',device='cpu')
+    config=PickingVariantsConfig(checkpoint,panel,tmp_path/'out',device='cpu',overwrite=False)
     bundle=dict(unet=object(),identity_encoder=object(),age_estimator=object())
     result=run_picking_variants(config,bundle=bundle,sweep_backend=sweep)
-    assert starts==pytest.approx([.15,.29,.29,.29])
+    assert starts==pytest.approx([.095,.23,.23,.23])
     assert result['manifest'].initial_strength.tolist()==pytest.approx([v for _,_,s in pairs for v in [s,s]])
     cached=run_picking_variants(config,bundle=bundle,sweep_backend=lambda **k:pytest.fail('cached pair repeated'))
     assert cached['failures'].empty
@@ -76,12 +76,107 @@ def test_default_picking_start_depends_on_gap_not_absolute_target_and_resumes(tm
 def test_gap_start_interpolates_and_respects_search_bounds():
     from src.comparisong.picking_variants import PickingVariantsConfig,initial_strength_for_transition
     config=PickingVariantsConfig('checkpoint','manifest','output')
+    assert initial_strength_for_transition(40,42,config)==pytest.approx(.062)
+    assert initial_strength_for_transition(38,68,config)==pytest.approx(.23)
     assert initial_strength_for_transition(30,45,config)==pytest.approx(.185)
     config.max_strength=.25
-    assert initial_strength_for_transition(38,68,config)==.25
+    assert initial_strength_for_transition(38,78,config)==.25
     config.delta_age_strength_map={-1:.2}
     with pytest.raises(ValueError,match='delta_age_strength_map'):
         initial_strength_for_transition(38,68,config)
+
+
+def test_mouth_protection_reaches_actual_prompt_without_classifier_or_state_guess():
+    from src.comparisong.picking_variants import protected_prompt_assistance
+    from src.inference.prompt_assistance import resolve_prompt_assistance
+    supplied=dict(positive_global_terms=[],negative_global_terms=[],max_support_terms_per_block=4,
+        use_mouth_rules=True,use_eye_rules=True,use_expression_rules=False)
+    effective=protected_prompt_assistance(supplied)
+    resolved=resolve_prompt_assistance(base_target_prompt='portrait at age 60',
+        prompt_assistance_config=effective,source_mouth_state='unknown',source_expression_state='unknown')
+    for term in ['preserve mouth shape','preserve original mouth opening','preserve natural teeth visibility']:
+        assert term in resolved['positive_terms']
+    for term in ['malformed mouth','distorted lips','deformed teeth','extra teeth']:
+        assert term in resolved['negative_prompt']
+    assert 'natural eyes' in resolved['positive_terms']
+    assert 'keep lips closed' not in resolved['target_prompt']
+    assert 'open mouth' not in resolved['negative_terms']
+    assert resolved['warnings']==[]
+    assert supplied['positive_global_terms']==[]  # User config is not mutated.
+
+
+def test_overwrite_is_default_even_with_resume_and_never_exposes_old_image_on_failure(tmp_path):
+    from src.comparisong.picking_variants import PickingVariantsConfig,run_picking_variants
+    source=tmp_path/'source.png';Image.new('RGB',(16,16)).save(source)
+    panel=tmp_path/'panel.csv'
+    pd.DataFrame([dict(sample_id='p0',identity_id='id_1',source_path=str(source),target_path=str(source),
+        source_age=40,target_age=42)]).to_csv(panel,index=False)
+    checkpoint=tmp_path/'adapter.pt';checkpoint.write_bytes(b'toy adapter')
+    config=PickingVariantsConfig(checkpoint,panel,tmp_path/'out',device='cpu',resume=True)
+    bundle=dict(unet=object(),identity_encoder=object(),age_estimator=object())
+    calls=[]
+    def sweep(**kwargs):
+        calls.append(1)
+        frame=pd.DataFrame([dict(strength=.1)])
+        color=(len(calls)*20,0,0)
+        frame.attrs['selected_results']=[{'image':Image.new('RGB',(16,16),color)}]
+        frame.attrs['assisted_results']=[{'image':Image.new('RGB',(16,16),color)}]
+        frame.attrs['assisted']=frame.copy()
+        return frame
+    first=run_picking_variants(config,bundle=bundle,sweep_backend=sweep)
+    second=run_picking_variants(config,bundle=bundle,sweep_backend=sweep)
+    assert len(calls)==2
+    assert second['manifest'].generated_path.tolist()==first['manifest'].generated_path.tolist()
+    for path in second['manifest'].generated_path:
+        assert Image.open(path).getpixel((0,0))==(40,0,0)
+    assert len(list((tmp_path/'out/stale').rglob('*.png')))==2
+    def fail(**kwargs):raise RuntimeError('synthetic generation failure')
+    failed=run_picking_variants(config,bundle=bundle,sweep_backend=fail)
+    assert len(failed['failures'])==2
+    assert not list((tmp_path/'out/generated').rglob('*.png'))
+    assert len(list((tmp_path/'out/stale').rglob('*.png')))==4
+    refreshed=run_picking_variants(config,bundle=bundle,sweep_backend=sweep)
+    assert refreshed['failures'].empty  # overwrite also retries earlier failed files.
+
+
+def test_old_mouthless_outputs_are_replaced_and_preserved_in_stale(tmp_path):
+    from dataclasses import asdict
+    from src.comparisong.picking_variants import PickingVariantsConfig,run_picking_variants
+    from src.comparisong.evaluation_backends_v2 import file_hash
+    from src.aging_bias.features import stable_hash
+    from src.quantitative_metrics.image_io import ImageResolver
+    source=tmp_path/'source.png';Image.new('RGB',(16,16)).save(source)
+    panel=tmp_path/'panel.csv'
+    pd.DataFrame([dict(sample_id='p0',identity_id='id_1',source_path=str(source),target_path=str(source),
+        source_age=40,target_age=42)]).to_csv(panel,index=False)
+    checkpoint=tmp_path/'adapter.pt';checkpoint.write_bytes(b'toy adapter')
+    config=PickingVariantsConfig(checkpoint,panel,tmp_path/'out',device='cpu',overwrite=False,
+        prompt_assistance_config=dict(positive_global_terms=[],negative_global_terms=[],max_support_terms_per_block=4))
+    params=asdict(config)
+    for key in ['checkpoint_path','test_manifest_path','output_dir','source_root','resume','retry_failed','device','overwrite']:params.pop(key)
+    signature=stable_hash(dict(config=params,checkpoint_sha256=file_hash(checkpoint),version='paired-smart-prompts-v2-delta-start'))
+    old_key=stable_hash(dict(run=signature,source=ImageResolver().load(source)[1],source_age=40,target_age=42))
+    for variant in ['ours_picking_no_prompt','ours_picking_prompt']:
+        path=tmp_path/'out/generated'/variant/'id_1/p0.png';path.parent.mkdir(parents=True)
+        Image.new('RGB',(16,16),(255,0,0)).save(path)
+        path.with_suffix('.json').write_text(json.dumps(dict(signature=old_key,selection=dict(strength=.04))))
+    def sweep(**kw):
+        from src.inference.prompt_assistance import resolve_prompt_assistance
+        resolved=resolve_prompt_assistance(base_target_prompt='portrait',prompt_assistance_config=kw['prompt_assistance_config'],
+            source_mouth_state=kw['source_mouth_state'],source_expression_state=kw['source_expression_state'])
+        assert 'deformed teeth' in resolved['negative_terms']
+        frame=pd.DataFrame([dict(strength=.1)])
+        frame.attrs['selected_results']=[{'image':Image.new('RGB',(16,16),(0,255,0))}]
+        frame.attrs['assisted_results']=[{'image':Image.new('RGB',(16,16),(0,0,255))}]
+        frame.attrs['assisted']=frame.copy()
+        return frame
+    bundle=dict(unet=object(),identity_encoder=object(),age_estimator=object())
+    result=run_picking_variants(config,bundle=bundle,sweep_backend=sweep)
+    assert result['failures'].empty
+    assert Image.open(result['manifest'].iloc[1].generated_path).getpixel((0,0))==(0,0,255)
+    assert len(list((tmp_path/'out/stale').rglob('*.png')))==2
+    cached=run_picking_variants(config,bundle=bundle,sweep_backend=lambda **k:pytest.fail('new results not reused'))
+    assert cached['failures'].empty
 
 
 def test_reports_export_all_and_aging_for_every_model(tmp_path):
