@@ -141,7 +141,7 @@ def evaluate_paper_v2(config,*,bundle,reference_bundle=None):
     output=Path(config.output_dir);output.mkdir(parents=True,exist_ok=True)
     checks=run_self_checks(output/'validation')
     if not checks.passed.all():raise RuntimeError('Synthetic self-checks failed; evaluation stopped before any network execution')
-    ref=reference_bundle or ReferenceBundle.load(config.reference_bundle_path)
+    ref=reference_bundle or ReferenceBundle.load(config.reference_bundle_path,load_training_data=False)
     policy=ref.metadata.get('reliability_policy',{})
     panel=load_test_panel(config.test_manifest_path,config.source_root)
     for direction in ['all','aging','rejuvenation']:

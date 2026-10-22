@@ -75,3 +75,53 @@ def test_ffhq_photo_selection_never_substitutes_segmentation_maps(tmp_path):
     pd.DataFrame({'image_number':[0],'age_group':['20-29'],'age_group_confidence':[1.]}).to_csv(tmp_path/'ffhq_aging_labels.csv',index=False)
     result=load_ffhq_manifest(tmp_path)
     assert '/images/' in result.iloc[0].image_path
+
+
+def test_saved_training_ids_can_be_read_without_pickle(tmp_path):
+    from src.aging_bias.references import ReferenceBundle
+    b=reference()
+    b.training_data=dict(c_ids=pd.Series(['id_001','id_002']).astype(str).to_numpy(),
+        c_age=np.array([30.,50.]),c_phi=np.array([[1.,2.],[3.,4.]]))
+    b.save(tmp_path)
+    with np.load(tmp_path/'references.npz',allow_pickle=False) as data:
+        assert data['training__c_ids'].tolist()==['id_001','id_002']
+    restored=ReferenceBundle.load(tmp_path)
+    assert restored.training_data['c_ids'].tolist()==['id_001','id_002']
+
+
+def _old_object_reference(root):
+    b=reference();b.save(root)
+    with np.load(root/'references.npz',allow_pickle=False) as data:
+        values={k:data[k] for k in data.files}
+    values.update(training__c_ids=np.array(['id_001','id_002'],dtype=object),
+        training__c_age=np.array([30.,50.]),training__c_phi=np.array([[1.,2.],[3.,4.]]))
+    np.savez_compressed(root/'references.npz',**values)
+    return pd.DataFrame(dict(identity_id=['id_001','id_002'],age=[30.,50.],
+        phi__a=[1.,3.],phi__b=[2.,4.]))
+
+
+def test_old_object_ids_recovered_from_matching_parquet_without_rewriting_archive(tmp_path):
+    from src.aging_bias.references import ReferenceBundle
+    frame=_old_object_reference(tmp_path)
+    frame.to_parquet(tmp_path/'train_features.parquet',index=False)
+    original=(tmp_path/'references.npz').read_bytes()
+    restored=ReferenceBundle.load(tmp_path)
+    assert restored.training_data['c_ids'].tolist()==['id_001','id_002']
+    assert (tmp_path/'references.npz').read_bytes()==original
+    np.testing.assert_array_equal(restored.d_C([20],[40]),[[2.,4.]])
+
+
+def test_old_reference_recovery_rejects_misaligned_sidecar(tmp_path):
+    from src.aging_bias.references import ReferenceBundle
+    frame=_old_object_reference(tmp_path)
+    frame.iloc[::-1].to_parquet(tmp_path/'train_features.parquet',index=False)
+    with pytest.raises(ValueError,match='match'):
+        ReferenceBundle.load(tmp_path)
+
+
+def test_evaluation_only_load_skips_legacy_object_training_arrays(tmp_path):
+    from src.aging_bias.references import ReferenceBundle
+    _old_object_reference(tmp_path)
+    restored=ReferenceBundle.load(tmp_path,load_training_data=False)
+    assert restored.training_data=={}
+    np.testing.assert_array_equal(restored.d_C([20],[40]),[[2.,4.]])

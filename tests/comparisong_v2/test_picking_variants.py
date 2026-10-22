@@ -1,6 +1,7 @@
 import json
 import numpy as np
 import pandas as pd
+import pytest
 from PIL import Image
 
 
@@ -38,6 +39,49 @@ def test_smart_variants_keep_prompt_even_when_worse_and_resume(tmp_path):
     assert Image.open(rows.loc['ours_picking_prompt','generated_path']).getpixel((0,0))==(0,0,255)
     run_picking_variants(cfg,bundle=bundle,sweep_backend=lambda **kw:(_ for _ in ()).throw(AssertionError('cached inference repeated')))
     assert module.placements==['cpu','cpu']  # Activate once, offload once, cached run inactive.
+
+
+def test_default_picking_start_depends_on_gap_not_absolute_target_and_resumes(tmp_path):
+    from src.comparisong.picking_variants import PickingVariantsConfig,run_picking_variants
+    source=tmp_path/'source.png';Image.new('RGB',(16,16)).save(source)
+    pairs=[(38,43,.15),(38,68,.29),(18,48,.29),(68,38,.29)]
+    panel=tmp_path/'panel.csv'
+    pd.DataFrame([dict(sample_id=f'p{i}',identity_id='id_1',source_path=str(source),target_path=str(source),
+        source_age=a,target_age=b) for i,(a,b,_) in enumerate(pairs)]).to_csv(panel,index=False)
+    checkpoint=tmp_path/'adapter.pt';checkpoint.write_bytes(b'toy adapter')
+    starts=[]
+    def sweep(**kwargs):
+        target=kwargs['target_ages'][0]
+        assert set(kwargs['target_age_strength_map'])=={target}
+        start=kwargs['target_age_strength_map'][target];starts.append(start)
+        frame=pd.DataFrame([dict(strength=start)])
+        frame.attrs['selected_results']=[{'image':Image.new('RGB',(16,16))}]
+        frame.attrs['assisted_results']=[{'image':Image.new('RGB',(16,16))}]
+        frame.attrs['assisted']=frame.copy()
+        return frame
+    config=PickingVariantsConfig(checkpoint,panel,tmp_path/'out',device='cpu')
+    bundle=dict(unet=object(),identity_encoder=object(),age_estimator=object())
+    result=run_picking_variants(config,bundle=bundle,sweep_backend=sweep)
+    assert starts==pytest.approx([.15,.29,.29,.29])
+    assert result['manifest'].initial_strength.tolist()==pytest.approx([v for _,_,s in pairs for v in [s,s]])
+    cached=run_picking_variants(config,bundle=bundle,sweep_backend=lambda **k:pytest.fail('cached pair repeated'))
+    assert cached['failures'].empty
+    config.delta_age_strength_map={0:.2,60:.2}
+    refreshed=run_picking_variants(config,bundle=bundle,sweep_backend=sweep)
+    assert refreshed['failures'].empty
+    assert starts[4:]==pytest.approx([.2]*4)
+    assert len(list((tmp_path/'out/stale').rglob('*.png')))==8
+
+
+def test_gap_start_interpolates_and_respects_search_bounds():
+    from src.comparisong.picking_variants import PickingVariantsConfig,initial_strength_for_transition
+    config=PickingVariantsConfig('checkpoint','manifest','output')
+    assert initial_strength_for_transition(30,45,config)==pytest.approx(.185)
+    config.max_strength=.25
+    assert initial_strength_for_transition(38,68,config)==.25
+    config.delta_age_strength_map={-1:.2}
+    with pytest.raises(ValueError,match='delta_age_strength_map'):
+        initial_strength_for_transition(38,68,config)
 
 
 def test_reports_export_all_and_aging_for_every_model(tmp_path):

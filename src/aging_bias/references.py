@@ -98,7 +98,14 @@ class ReferenceBundle:
     def save(self,destination):
         root=Path(destination);root.mkdir(parents=True,exist_ok=True)
         arrays={k:getattr(self,k) for k in ['knots','f_coeff','mu_c','p_ages','mu_p','mean','sd','icc']}
-        arrays.update({'training__'+k:v for k,v in self.training_data.items()})
+        for key,value in self.training_data.items():
+            value=np.asarray(value)
+            if key=='c_ids':
+                if not all(isinstance(v,(str,np.str_)) for v in value.ravel()):
+                    raise ValueError('Training identity IDs must be strings')
+                value=value.astype(str)
+            if value.dtype.hasobject:raise ValueError(f'Training array {key} cannot contain Python objects')
+            arrays['training__'+key]=value
         np.savez_compressed(root/'references.npz',**arrays)
         meta=dict(version='aging-bias-reference-v1',created_at=datetime.now(timezone.utc).isoformat(),
             attributes=self.attributes,feature_config_hash=self.feature_config_hash,support=list(self.support),metadata=self.metadata,strata=list(self.strata))
@@ -107,15 +114,50 @@ class ReferenceBundle:
         return root
 
     @classmethod
-    def load(cls,source):
+    def load(cls,source,*,load_training_data=True):
+        """Safe numeric/string loading; legacy IDs are recovered from features.
+
+        Evaluation only needs the fitted curves, so callers may omit training
+        arrays explicitly. Object arrays are NEVER deserialized with pickle.
+        """
         root=Path(source);meta=json.loads((root/'references.json').read_text())
         if meta['version']!='aging-bias-reference-v1':raise ValueError('Unsupported reference version')
         with np.load(root/'references.npz',allow_pickle=False) as a:
             arrays={k:a[k].copy() for k in ['knots','f_coeff','mu_c','p_ages','mu_p','mean','sd','icc']}
-            training={k[10:]:a[k].copy() for k in a.files if k.startswith('training__')}
+            training={};recover_ids=False
+            if load_training_data:
+                for key in a.files:
+                    if not key.startswith('training__'):continue
+                    try:training[key[10:]]=a[key].copy()
+                    except ValueError as exc:
+                        if key!='training__c_ids' or 'Object arrays' not in str(exc):raise
+                        recover_ids=True
+        if recover_ids:
+            sidecar=root/'train_features.parquet'
+            sex=meta.get('metadata',{}).get('sex')
+            if not sidecar.is_file() and sex:sidecar=root.parent/'train_features.parquet'
+            if not sidecar.is_file():
+                raise ValueError('Legacy object identity IDs require train_features.parquet. '
+                    'For module 2 only, use ReferenceBundle.load(path, load_training_data=False); no refit is needed.')
+            frame=pd.read_parquet(sidecar)
+            if sex:
+                if 'gender' not in frame:raise ValueError('Training sidecar does not match stratum: missing gender')
+                frame=frame[frame.gender==sex]
+            columns=['phi__'+name for name in meta['attributes']]
+            required=['identity_id','age']+columns
+            if not set(required)<=set(frame) or frame.identity_id.isna().any():
+                raise ValueError('Training sidecar does not match the reference columns')
+            values=(frame[columns].to_numpy(float)-arrays['mean'])/arrays['sd']
+            ages=frame.age.to_numpy(float)
+            if ('c_age' not in training or 'c_phi' not in training or
+                ages.shape!=training['c_age'].shape or values.shape!=training['c_phi'].shape or
+                not np.allclose(ages,training['c_age'],equal_nan=True) or
+                not np.allclose(values,training['c_phi'],equal_nan=True)):
+                raise ValueError('Training sidecar rows do not match the saved reference arrays; refusing to guess identity order')
+            training['c_ids']=np.asarray(frame.identity_id.astype(str).tolist(),dtype=str)
         return cls(**arrays,attributes=meta['attributes'],feature_config_hash=meta['feature_config_hash'],
             support=tuple(meta['support']),metadata=meta['metadata'],training_data=training,
-            strata={label:cls.load(root/('stratum_'+label)) for label in meta.get('strata',[])})
+            strata={label:cls.load(root/('stratum_'+label),load_training_data=load_training_data) for label in meta.get('strata',[])})
 
 
 def load_colombia_manifest(config):
@@ -182,7 +224,7 @@ def fit_reference_frames(colombia,proxy,attributes,knots,mean,sd,icc,feature_con
     cv=(colombia[columns].to_numpy(float)-mean)/sd
     pv=(proxy[columns].to_numpy(float)-mean)/sd
     q=colombia.reindex(columns=CAPTURE,fill_value=0).to_numpy(float)
-    age=colombia.age.to_numpy(float);ids=colombia.identity_id.astype(str).to_numpy()
+    age=colombia.age.to_numpy(float);ids=colombia.identity_id.to_numpy(dtype=str)
     coef,capture=fit_panel_fe(age,cv,ids,knots,q)
     unadjusted,_=fit_panel_fe(age,cv,ids,knots)
     mu=np.full_like(coef,np.nan)
