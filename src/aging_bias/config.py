@@ -97,6 +97,7 @@ class PaperV2Config:
     oracle_d_bounds: tuple = (.7, 1.3)
     oracle_ratio_tolerance: float = .15
     oracle_homog_tolerance: float = .15
+    cache_dir: str | Path | None = None
 
 
 @dataclass

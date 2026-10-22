@@ -70,8 +70,9 @@ def prepare_reference_backend(root='/content/evaluation_models_v2',*,feature_con
 
 
 def prepare_embedding_reference_backend(reference_config,*,root='/content/evaluation_models_v2',
-                                        encoder=None,landmark_backend=None,allow_download=False):
-    """Explicit DINOv2 CPU setup and train/proxy PCA, safe to resume.
+                                        encoder=None,landmark_backend=None,allow_download=False,
+                                        reference_frames_path=None,excluded_test_ids=(),device='auto'):
+    """Explicit DINOv2 setup and train/proxy PCA, safe to resume.
 
     Leakage validation happens BEFORE constructing/downloading any model.
     Call build_reference_bundle with the returned backends, as for handcrafted.
@@ -79,16 +80,29 @@ def prepare_embedding_reference_backend(reference_config,*,root='/content/evalua
     from src.aging_bias.references import load_colombia_manifest,load_ffhq_manifest
     from src.aging_bias.embedding_features import DinoV2Encoder,fit_reference_embedding
     config=reference_config
-    colombia=load_colombia_manifest(config)
-    proxy=load_ffhq_manifest(config.ffhq_aging_root,config.ffhq_labels_path,
-        config.ffhq_min_conf,config.ffhq_max_per_group,config.seed)
+    if reference_frames_path is None:
+        colombia=load_colombia_manifest(config)
+        proxy=load_ffhq_manifest(config.ffhq_aging_root,config.ffhq_labels_path,
+            config.ffhq_min_conf,config.ffhq_max_per_group,config.seed)
+    else:
+        from src.aging_bias.cached_references import load_saved_reference_frames
+        _,_,colombia,proxy=load_saved_reference_frames(reference_frames_path,excluded_test_ids)
     if landmark_backend is None:
         prepared=prepare_reference_backend(root,feature_config=config.features,allow_download=allow_download)
         landmark_backend=prepared['landmark_backend']
     if encoder is None:
-        encoder=DinoV2Encoder(local_files_only=not allow_download,device='cpu',cache_dir=str(Path(root)/'huggingface'))
-    fitted=fit_reference_embedding(config,colombia,proxy,encoder,landmark_backend)
-    return dict(feature_config=config.features,feature_backend=fitted,landmark_backend=landmark_backend)
+        if device=='auto':
+            import torch
+            device='cuda' if torch.cuda.is_available() else 'cpu'
+        print(f'[DINOv2] Encoder resident on {device}; bounded batches, PCA on CPU.',flush=True)
+        encoder=DinoV2Encoder(local_files_only=not allow_download,device=device,cache_dir=str(Path(root)/'huggingface'))
+    try:
+        fitted=fit_reference_embedding(config,colombia,proxy,encoder,landmark_backend)
+    except BaseException:
+        if hasattr(encoder,'to'):encoder.to('cpu')
+        raise
+    return dict(feature_config=config.features,feature_backend=fitted,landmark_backend=landmark_backend,
+        embedding_device=str(getattr(encoder,'device',device)))
 
 
 def prepare_paper_bundle(root='/content/evaluation_models_v2',*,feature_config=None,

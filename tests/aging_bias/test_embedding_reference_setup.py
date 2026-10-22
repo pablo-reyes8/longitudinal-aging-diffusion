@@ -49,3 +49,26 @@ def test_embedding_pca_rejects_mismatched_encoder(tmp_path):
     encoder=Encoder();encoder.cache_id='different-weights'
     with pytest.raises(ValueError,match='encoder'):
         EmbeddingFeatureBackend(encoder,2).load(tmp_path/'pca.npz')
+
+
+def test_dino_setup_prefers_gpu_and_offloads_on_fit_error(tmp_path,monkeypatch):
+    from src.aging_bias.config import ReferenceConfig
+    import src.aging_bias.references as refs
+    import src.aging_bias.embedding_features as embeddings
+    from src.comparisong.evaluation_backends_v2 import prepare_embedding_reference_backend
+    import torch
+    devices=[]
+    class Encoder:
+        def __init__(self,**kwargs):
+            self.device=kwargs['device'];devices.append(self.device)
+        def to(self,device):devices.append(device);self.device=device
+    monkeypatch.setattr(torch.cuda,'is_available',lambda:True)
+    monkeypatch.setattr(refs,'load_colombia_manifest',lambda *a:pd.DataFrame())
+    monkeypatch.setattr(refs,'load_ffhq_manifest',lambda *a:pd.DataFrame())
+    monkeypatch.setattr(embeddings,'DinoV2Encoder',Encoder)
+    def fail(*a):raise ValueError('synthetic PCA failure')
+    monkeypatch.setattr(embeddings,'fit_reference_embedding',fail)
+    cfg=ReferenceConfig(tmp_path,tmp_path,tmp_path/'refs',train_only=True)
+    with pytest.raises(ValueError,match='synthetic PCA'):
+        prepare_embedding_reference_backend(cfg,landmark_backend=object())
+    assert devices==['cuda','cpu']

@@ -15,6 +15,10 @@ class DinoV2Encoder:
         self.model=AutoModel.from_pretrained(model_id,local_files_only=local_files_only,cache_dir=cache_dir).eval().requires_grad_(False).to(device)
         self.device=device;self.cache_id=model_id+':'+str(getattr(self.model.config,'_commit_hash',None))
 
+    def to(self,device):
+        self.model.to(device);self.device=device
+        return self
+
     def encode_batch(self,images):
         import torch
         with torch.inference_mode():
@@ -73,6 +77,10 @@ class CachedEncoder:
     def __init__(self,encoder,root):
         self.encoder=encoder;self.cache_id=encoder.cache_id
         self.root=Path(root)/stable_hash(self.cache_id);self.root.mkdir(parents=True,exist_ok=True)
+
+    def to(self,device):
+        if hasattr(self.encoder,'to'):self.encoder.to(device)
+        return self
 
     def encode_batch(self,images):
         output=[None]*len(images);pending=[]

@@ -103,8 +103,12 @@ class OperationalStore:
         flush()
 
 
-def _arrays(frame,attributes):
-    return {k:frame[[k+'__'+a for a in attributes]].to_numpy(float) for k in ['g','d_C','d_P','G_P','zeta']}
+def _arrays(frame,attributes,common=False):
+    arrays={k:frame[[k+'__'+a for a in attributes]].to_numpy(float) for k in ['g','d_C','d_P','G_P','zeta']}
+    if common:
+        mask=frame[['common_valid__'+a for a in attributes]].to_numpy(bool)
+        arrays={k:np.where(mask,v,np.nan) for k,v in arrays.items()}
+    return arrays
 
 
 def _operational_summary(frame,weights,model,subset,panel,delta_bin='all'):
@@ -152,9 +156,10 @@ def evaluate_paper_v2(config,*,bundle,reference_bundle=None):
     original=pd.read_csv(config.test_manifest_path,dtype={'sample_id':str,'identity_id':str})
     models=list(dict.fromkeys(config.models))
     if not models or {'source_noedit','oracle_target'}&set(models):raise ValueError('Supply actual models; anchors are added automatically')
-    store=FeatureStore(output/'cache'/'features',config.features,bundle.get('landmark_backend'),bundle.get('feature_backend'),config.resume)
+    cache=Path(config.cache_dir or output/'cache')
+    store=FeatureStore(cache/'features',config.features,bundle.get('landmark_backend'),bundle.get('feature_backend'),config.resume)
     if store.config_hash!=ref.feature_config_hash:raise ValueError('Feature/preprocessing configuration differs from reference bundle; use the same FeatureConfig and backend')
-    operational=OperationalStore(bundle,output/'cache'/'operational',config.resume)
+    operational=OperationalStore(bundle,cache/'operational',config.resume)
     failures=[];rows=[];paths=[]
     print(f'[paper v2] {len(panel)} transitions; cached descriptors and CPU metrics, no generation',flush=True)
     def feature(path,sample,model,role):
@@ -233,8 +238,17 @@ def evaluate_paper_v2(config,*,bundle,reference_bundle=None):
             rows.append(row);paths.append(dict(sample,model_name=model,generated_path=row['generated_path']))
         if (i+1)%20==0:print(f'[paper v2] descriptors/metrics {i+1}/{len(panel)}',flush=True)
     per=pd.DataFrame(rows)
-    valid_sets=[set(per.loc[(per.model_name==m)&per.feature_valid&per.operational_valid,'sample_id']) for m in models]
+    valid_sets=[set(per.loc[(per.model_name==m)&per.feature_valid&per.operational_valid,'sample_id']) for m in models+['source_noedit','oracle_target']]
     common=set.intersection(*valid_sets)
+    ids=sorted(common)
+    shared=np.ones((len(ids),len(ref.attributes)),bool)
+    for m in models+['source_noedit','oracle_target']:
+        aligned=per[per.model_name.eq(m)].set_index('sample_id').loc[ids]
+        shared&=np.logical_and.reduce([np.isfinite(v) for v in _arrays(aligned,ref.attributes).values()])
+    common={sid for sid,valid in zip(ids,shared.any(1)) if valid}
+    for j,name in enumerate(ref.attributes):
+        lookup=dict(zip(ids,shared[:,j]))
+        per['common_valid__'+name]=per.sample_id.map(lookup).fillna(False).astype(bool)
     per['in_common_panel']=per.sample_id.isin(common)
     per['direction']=np.where(per.delta_age>0,'aging','rejuvenation')
     all_indices=[];all_bybin=[];paired=[];ops=[];anchor_indices=[]
@@ -256,7 +270,8 @@ def evaluate_paper_v2(config,*,bundle,reference_bundle=None):
             print(f'[paper v2] {panel_name}/{subset}: structural fit + {config.n_boot if panel_name=="common" else 0} identity bootstrap draws',flush=True)
             base=sub[sub.model_name==names[0]].reset_index(drop=True)
             weights=transition_weights(base,config.weighting)
-            arrays={m:_arrays(sub[sub.model_name==m].set_index('sample_id').loc[base.sample_id].reset_index(),ref.attributes) for m in names}
+            arrays={m:_arrays(sub[sub.model_name==m].set_index('sample_id').loc[base.sample_id].reset_index(),ref.attributes,
+                common=panel_name=='common') for m in names}
             result=calibrated(bootstrap_models(base,arrays,config.weighting,n_boot=config.n_boot if panel_name=='common' else 0,seed=config.seed,**fit_opts))
             idx=result['indices'].assign(panel=panel_name,subset=subset,
                 weighting_merges=json.dumps(result['weights'].attrs['merges']))
@@ -293,11 +308,15 @@ def evaluate_paper_v2(config,*,bundle,reference_bundle=None):
     indices=pd.concat(all_indices,ignore_index=True) if all_indices else pd.DataFrame(columns=index_columns)
     bybin=pd.concat(all_bybin,ignore_index=True) if all_bybin else pd.DataFrame(columns=index_columns+['delta_bin'])
     contrasts=pd.concat(paired,ignore_index=True) if paired else pd.DataFrame(columns=['model_a','model_b','index_name','difference','ci_low','ci_high','share_ok'])
+    stable=contrasts[contrasts.get('comparison_status',pd.Series(index=contrasts.index,dtype=str)).eq('ok')]
+    stable.to_csv(output/'paired_differences_stable.csv',index=False)
     anchor=pd.concat(anchor_indices,ignore_index=True) if anchor_indices else pd.DataFrame(columns=['scheme','subset'])
     reliable=np.asarray(policy.get('active_homog',np.ones(len(ref.icc),bool)),bool)
     reliability_weights=np.asarray(policy.get('attribute_weights',ref.icc),float) if policy.get('weight_by_icc') else np.ones(len(ref.icc))
     noise_share=float(np.average(1-ref.icc[reliable],weights=reliability_weights[reliable])) if reliable.any() else np.nan
     anchors=validate_real_anchors(anchor,noise_share,config.oracle_d_bounds,config.oracle_ratio_tolerance,config.oracle_homog_tolerance)
+    # Stable bootstrap is necessary, not sufficient: real anchors must pass too.
+    stable.assign(anchors_passed=anchors['passed']).iloc[:None if anchors['passed'] else 0].to_csv(output/'paired_differences_stable.csv',index=False)
     if not anchors['passed']:warnings.warn('REAL ANCHORS FAILED: do not interpret bias ratios or start SD1.5 counterfactual; inspect validation/real_anchors.json')
     (output/'validation'/'real_anchors.json').write_text(json.dumps(anchors,indent=2,allow_nan=True))
     anchor.to_csv(output/'validation'/'oracle_indices.csv',index=False)
@@ -333,6 +352,7 @@ def evaluate_paper_v2(config,*,bundle,reference_bundle=None):
         weighting_merges=transition_weights(panel,config.weighting).attrs['merges'],seed=config.seed,
         ci_scope='identity bootstrap conditional on fitted references; not joint reference uncertainty',anchors_passed=anchors['passed'],
         reliability_policy=policy,
+        common_panel_policy='same pairs and attribute cells across all models, source and real target',
         n_pairs_outside_reliability_age=int(per.drop_duplicates('sample_id').reliability_age_supported.eq(False).sum()))
     per.to_parquet(output/'per_sample.parquet',index=False)
     per.to_csv(output/'per_sample.csv',index=False)

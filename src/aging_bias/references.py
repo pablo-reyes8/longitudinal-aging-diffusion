@@ -261,6 +261,12 @@ def build_reference_bundle(config,*,feature_backend=None,landmark_backend=None):
         return pd.DataFrame(rows),failures
     c,cf=extract(colombia);p,pf=extract(proxy)
     pd.DataFrame(cf+pf,columns=['identity_id','image_path','age','error']).to_csv(root/'reference_failures.csv',index=False)
+    return fit_reference_feature_frames(config,c,p,store.config_hash)
+
+
+def fit_reference_feature_frames(config,c,p,feature_config_hash):
+    """Fit only statistical references from already extracted train/proxy rows."""
+    root=Path(config.output_dir);root.mkdir(parents=True,exist_ok=True)
     if c.empty or p.empty:raise ValueError('No reference features extracted; inspect reference_failures.csv and landmark backend')
     attrs=[k[5:] for k in c if k.startswith('phi__')]
     quality=[]
@@ -293,7 +299,7 @@ def build_reference_bundle(config,*,feature_backend=None,landmark_backend=None):
     if active.empty:raise ValueError('No active reference attributes: inspect attribute_reliability.csv and reference_quality.csv for adult retests, ICC, variation and proxy support. No threshold or age fallback was applied.')
     attrs=active.attribute.tolist();columns=['phi__'+k for k in attrs]
     bundle=fit_reference_frames(c,p,attrs,config.knots,c[columns].mean().to_numpy(),c[columns].std().to_numpy(),
-        active.icc.to_numpy(),store.config_hash,dict(config=asdict(config),train_identities=sorted(c.identity_id.astype(str).unique()),
+        active.icc.to_numpy(),feature_config_hash,dict(config=asdict(config),train_identities=sorted(c.identity_id.astype(str).unique()),
             proxy='FFHQ-Aging (not a demographic nationality label)',age_period_cohort_limitation=True,
             reliability_policy=dict(weight_by_icc=config.weight_attributes_by_icc,
                 min_icc_pi=config.min_icc,min_icc_homog=config.min_homog_icc,
@@ -314,7 +320,7 @@ def build_reference_bundle(config,*,feature_backend=None,landmark_backend=None):
                     warnings.warn(f'Insufficient labeled reference support for {sex}; pooled fallback recorded')
                     continue
                 bundle.strata[sex]=fit_reference_frames(cs,ps,attrs,config.knots,bundle.mean,bundle.sd,
-                    bundle.icc,store.config_hash,dict(sex=sex,standardization='pooled Colombian train'))
+                    bundle.icc,feature_config_hash,dict(sex=sex,standardization='pooled Colombian train'))
             bundle.metadata['sex_strata']=list(bundle.strata)
     bundle.save(root);c.to_parquet(root/'train_features.parquet',index=False);p.to_parquet(root/'proxy_features.parquet',index=False)
     coefficients=bundle.training_data['capture_coef']

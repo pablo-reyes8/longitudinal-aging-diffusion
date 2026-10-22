@@ -67,6 +67,10 @@ def validate_real_anchors(indices, noise_share, d_bounds=(.7,1.3), ratio_toleran
                 ('pi',abs(r.pi)<ratio_tolerance or r.pi_ci_low<=0<=r.pi_ci_high),
                 ('drift',abs(r.drift)<ratio_tolerance),('homog',abs(r.homog-noise_share)<homog_tolerance)]:
                 records.append(dict(check='oracle_'+name,observed=float(r[name]),passed=bool(passed)))
+            records.append(dict(check='oracle_bootstrap_stability',observed=float(r.get('share_ok',np.nan)),
+                passed=bool(r.get('share_ok',0)>.9)))
     return dict(passed=bool(records) and all(r['passed'] for r in records),checks=records,
+        failed_checks=[r['check'] for r in records if not r['passed']],
+        oracle_rows=indices[indices.model_name.eq('oracle_target')].to_dict('records') if 'model_name' in indices else [],
         expected_noise_share=float(noise_share),
         note='If anchors fail, inspect ICC, alignment, resolution harmonization, reference support and identification before interpreting model ratios.')

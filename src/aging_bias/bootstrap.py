@@ -33,7 +33,7 @@ def calibrate_homogenization(indices,draws):
         good=[a.homog-b.homog for a,b in zip(model_draws,oracle_draws)
             if a.status==b.status=='ok' and np.isfinite([a.homog,b.homog]).all()]
         if model_draws:result.loc[i,'homog_excess_share_ok']=len(good)/len(model_draws)
-        if good:
+        if good and len(good)/len(model_draws)>.9 and row.get('share_ok',len(good)/len(model_draws))>.9:
             result.loc[i,['homog_excess_ci_low','homog_excess_ci_high']]=np.percentile(good,[2.5,97.5])
     return result
 
@@ -59,12 +59,13 @@ def bootstrap_models(transitions, model_arrays, weighting, n_boot=1000, seed=202
     fits={}; draws={}
     homog_mask=fit_options.pop('homogenization_mask',None)
     def fit_one(arrays,weights,warn=True):
-        fitted=estimate_bias_decomposition(**arrays,weights=weights,warn=warn,**fit_options)
+        options={**fit_options,'compute_diagnostics':warn}
+        fitted=estimate_bias_decomposition(**arrays,weights=weights,warn=warn,**options)
         if homog_mask is not None:
             mask=np.asarray(homog_mask,bool)
             if mask.shape!=(arrays['g'].shape[1],):raise ValueError('homogenization_mask shape mismatch')
             strict=fitted if mask.all() else estimate_bias_decomposition(**arrays,weights=weights,warn=warn,
-                attribute_mask=np.broadcast_to(mask,arrays['g'].shape),**fit_options)
+                attribute_mask=np.broadcast_to(mask,arrays['g'].shape),compute_diagnostics=False,**fit_options)
             fitted.homog=strict.homog;fitted.h=strict.h;fitted.homog_status=strict.status
         return fitted
     for m,a in model_arrays.items():
@@ -99,17 +100,38 @@ def bootstrap_models(transitions, model_arrays, weighting, n_boot=1000, seed=202
         if n_boot and fit.status=='ok' and row['share_ok']<.9:
             warnings.warn(f'Bootstrap {m}/{scheme}: share_ok={row["share_ok"]:.2f} < .9')
         for k in INDICES:
-            row[k+'_ci_low'],row[k+'_ci_high']=interval([getattr(v,k) for v in ok])
+            values=[getattr(v,k) for v in (draws[m,scheme] if k=='D' else ok)]
+            lo,hi=interval(values)
+            valid_share=sum(np.isfinite(getattr(v,k)) for v in ok)/n_boot if n_boot else 0
+            stable=n_boot>0 and fit.status=='ok' and valid_share>.9
+            if k!='D':
+                row[k+'_ci_low_conditional'],row[k+'_ci_high_conditional']=lo,hi
+                if not stable:lo=hi=np.nan
+                row[k+'_ci_status']='ok' if stable else 'unstable_bootstrap' if n_boot else 'not_bootstrapped'
+            row[k+'_ci_low'],row[k+'_ci_high']=lo,hi
+        for k in ['beta_C','beta_P','gamma','h']:
+            row[k+'_ci_low'],row[k+'_ci_high']=interval([getattr(v,k) for v in draws[m,scheme]])
+        row['share_identified']=sum(v.status in {'ok','no_edit'} for v in draws[m,scheme])/n_boot if n_boot else np.nan
+        row['n_boot_no_edit']=sum(v.status=='no_edit' for v in draws[m,scheme])
+        row['n_boot_not_identified']=sum(v.status=='not_identified' for v in draws[m,scheme])
         row['homog_share_ok']=sum(np.isfinite(v.homog) for v in ok)/n_boot if n_boot else np.nan
         records.append(row)
     names=list(model_arrays)
     for ai,a in enumerate(names):
         for b in names[ai+1:]:
             for scheme in schemes:
-                good=[(u,v) for u,v in zip(draws[a,scheme],draws[b,scheme]) if u.status==v.status=='ok']
                 for k in INDICES:
+                    good=[(u,v) for u,v in zip(draws[a,scheme],draws[b,scheme])
+                        if np.isfinite([getattr(u,k),getattr(v,k)]).all()]
                     lo,hi=interval([getattr(u,k)-getattr(v,k) for u,v in good])
+                    share_a=sum(np.isfinite(getattr(v,k)) for v in draws[a,scheme])/n_boot if n_boot else np.nan
+                    share_b=sum(np.isfinite(getattr(v,k)) for v in draws[b,scheme])/n_boot if n_boot else np.nan
+                    share=len(good)/n_boot if n_boot else np.nan
+                    stable=n_boot>0 and share_a>.9 and share_b>.9 and share>.9 and fits[a,scheme].status==fits[b,scheme].status=='ok'
+                    difference=getattr(fits[a,scheme],k)-getattr(fits[b,scheme],k)
+                    if k!='D' and not stable:difference=lo=hi=np.nan
                     paired.append(dict(model_a=a,model_b=b,scheme=scheme,index_name=k,
-                        difference=getattr(fits[a,scheme],k)-getattr(fits[b,scheme],k),
-                        ci_low=lo,ci_high=hi,share_ok=len(good)/n_boot if n_boot else np.nan))
+                        difference=difference,ci_low=lo,ci_high=hi,share_ok=share,
+                        share_ok_model_a=share_a,share_ok_model_b=share_b,
+                        comparison_status='ok' if stable else 'unstable_bootstrap'))
     return {'indices':pd.DataFrame(records),'paired':pd.DataFrame(paired),'draws':draws,'weights':weighted}
