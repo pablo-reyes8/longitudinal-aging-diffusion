@@ -186,7 +186,66 @@ def load_colombia_manifest(config):
     if overlap:raise ValueError(f'Test identity leakage in reference train: {sorted(overlap)[:10]}')
     if df.empty:raise ValueError('No training images after split filtering')
     df['image_path']=[str(Path(p) if Path(p).is_absolute() else Path(config.colombia_root)/p) for p in df.image_path]
+    if config.fairface_root is not None:
+        extra=_load_fairface_supplement(config.fairface_root)
+        overlap=excluded.intersection(extra.identity_id)
+        if overlap:raise ValueError(f'Test identity leakage in FairFace reference: {sorted(overlap)[:10]}')
+        df=df.assign(population_source='colombia_train',age_source='longitudinal_annotation')
+        df=pd.concat([df,extra],ignore_index=True)
     return df.reset_index(drop=True)
+
+
+def _load_fairface_supplement(root):
+    """Local frontal photos + predicted ages; each photo is a singleton identity.
+
+    Ignore stale Colab paths in metadata. No age-bin midpoint or missing-age
+    fallback: only available photos explicitly covered by age_predictions.csv.
+    Latino_Hispanic is a dataset label, not evidence of Colombian nationality.
+    """
+    root=Path(root).expanduser().resolve()
+    ages=pd.read_csv(root/'age_predictions.csv')
+    if not {'filename','age_pred'}<=set(ages):
+        raise ValueError('FairFace age_predictions.csv requires filename,age_pred')
+    if ages.filename.isna().any():raise ValueError('FairFace filenames cannot be missing')
+    ages['filename']=ages.filename.astype(str)
+    ages['age']=pd.to_numeric(ages.age_pred,errors='coerce')
+    if (ages.groupby('filename').age.nunique()>1).any():
+        raise ValueError('Conflicting FairFace predicted ages for the same filename')
+    ages=ages.drop_duplicates('filename')
+    # Frontality annotations are an explicit allowlist when provided.
+    frontal=root/'metadata_frontal.csv'
+    if frontal.is_file():
+        metadata=pd.read_csv(frontal)
+    elif (root/'metadata_frontal.json').is_file():
+        metadata=pd.DataFrame.from_dict(json.loads((root/'metadata_frontal.json').read_text()),orient='index').rename_axis('filename').reset_index()
+    elif (root/'metadata.csv').is_file():
+        metadata=pd.read_csv(root/'metadata.csv')
+    else:
+        metadata=None
+    if metadata is not None:
+        if 'filename' not in metadata or metadata.filename.duplicated().any():
+            raise ValueError('FairFace metadata requires unique filename entries')
+        columns=['filename']+[k for k in ['gender','gender_class','race','split'] if k in metadata]
+        ages=ages.merge(metadata[columns],on='filename',how='inner',validate='one_to_one')
+    if 'race' in ages:
+        ages=ages[ages.race.astype(str).str.lower().isin(['latino_hispanic','latino/hispanic','latino','hispanic'])]
+    if 'split' in ages:ages=ages[ages['split'].eq('train')]
+    ages=ages[ages.age.between(0,120)&np.isfinite(ages.age)]
+    rows=[]
+    for row in ages.to_dict('records'):
+        name=row['filename']
+        if Path(name).name!=name or '\\' in name or Path(name).suffix.lower() not in {'.jpg','.jpeg','.png'}:
+            raise ValueError(f'FairFace filename must be a photo basename: {name}')
+        candidates=[path for path in [root/name,root/'images'/name] if path.is_file()]
+        if len(candidates)>1:raise ValueError(f'Ambiguous FairFace photo: {name}')
+        if not candidates:continue
+        gender=str(row.get('gender','')).lower()
+        if gender not in {'male','female'}:gender={0:'male',1:'female'}.get(row.get('gender_class'),'unknown')
+        rows.append(dict(identity_id='fairface::'+name,age=float(row['age']),image_path=str(candidates[0]),
+            gender=gender,split='train',population_source='fairface_latino_hispanic',age_source='predicted_age'))
+    if not rows:raise ValueError('No available FairFace frontal photos with valid predicted ages; check folder and CSVs')
+    print(f'[references] FairFace supplement: {len(rows)} singleton photos; predicted ages, no longitudinal/retest pairs.',flush=True)
+    return pd.DataFrame(rows)
 
 
 def load_ffhq_manifest(root,labels_path=None,min_conf=.6,max_per_group=None,seed=2026):

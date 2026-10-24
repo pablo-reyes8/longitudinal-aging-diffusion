@@ -4,7 +4,8 @@ import pytest
 from PIL import Image
 
 
-def test_real_reference_builder_with_stub_features_and_retests(tmp_path):
+@pytest.mark.parametrize('with_fairface',[False,True])
+def test_real_reference_builder_with_stub_features_and_retests(tmp_path,with_fairface):
     from src.aging_bias import ReferenceConfig,build_reference_bundle
     class Backend:
         cache_id='train-only-toy-v1'
@@ -20,11 +21,23 @@ def test_real_reference_builder_with_stub_features_and_retests(tmp_path):
     pd.DataFrame({'image_number':range(4),'age_group':['15-19','30-39','50-69','70-120'],
         'age_group_confidence':[1.]*4}).to_csv(proxy/'ffhq_aging_labels.csv',index=False)
     cfg=ReferenceConfig(train,proxy,tmp_path/'out',train_only=True,knots=(0,20,40,60,80),min_retest_pairs=10)
+    if with_fairface:
+        supplement=tmp_path/'fairface';supplement.mkdir()
+        Image.new('RGB',(16,16),(100,0,30)).save(supplement/'train_000001.png')
+        pd.DataFrame(dict(filename=['train_000001.png'],age_pred=[55.5])).to_csv(supplement/'age_predictions.csv',index=False)
+        cfg.fairface_root=supplement
     ref=build_reference_bundle(cfg,feature_backend=Backend())
     assert ref.attributes==['signal'] and ref.icc[0]>.95
-    assert ref.mean[0]==pytest.approx(61.01)
-    assert len(ref.metadata['train_identities'])==15
+    assert ref.mean[0]==pytest.approx((61.01*90+100)/91 if with_fairface else 61.01)
+    assert len(ref.metadata['train_identities'])==(16 if with_fairface else 15)
     assert (tmp_path/'out/train_features.parquet').exists()
+    if with_fairface:
+        from src.aging_bias.cached_references import load_saved_reference_frames
+        _,saved,c,_=load_saved_reference_frames(cfg.output_dir)
+        assert str(saved.fairface_root)==str(supplement)
+        assert c.population_source.eq('fairface_latino_hispanic').sum()==1
+        assert c.age_source.eq('predicted_age').sum()==1
+        assert ref.metadata['reliability_policy']['active_homog']==[True]
 
 
 def test_embedding_pca_never_fit_on_test_and_roundtrip(tmp_path):

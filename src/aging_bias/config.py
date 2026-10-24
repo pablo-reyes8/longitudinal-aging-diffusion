@@ -65,6 +65,8 @@ class ReferenceConfig:
     embedding_components: int = 16
     embedding_fit_max_images: int = 2000
     embedding_batch_size: int = 16
+    # Optional cross-sectional supplement; never synthetic longitudinal pairs.
+    fairface_root: str | Path | None = None
 
     def __post_init__(self):
         if self.retest_min_age is not None and not 0 <= self.retest_min_age <= 120:
