@@ -130,7 +130,11 @@ def fit_reference_embedding(config,colombia,proxy,encoder,landmark_backend):
     vectors=[];splits=[];batch=[];batch_splits=[];failures=[]
     def flush():
         if not batch:return
-        vectors.extend(encoder.encode_batch(batch));splits.extend(batch_splits)
+        values=encoder.encode_batch(batch)
+        if config.features.flip_tta:
+            from PIL import Image
+            values=(values+encoder.encode_batch([im.transpose(Image.Transpose.FLIP_LEFT_RIGHT) for im in batch]))/2
+        vectors.extend(values);splits.extend(batch_splits)
         batch.clear();batch_splits.clear()
     for i,(split,path) in enumerate(candidates):
         try:

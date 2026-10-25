@@ -1,5 +1,17 @@
 """Population references and aging-bias evaluation (independent of legacy APIs)."""
-from .config import FeatureConfig, ReferenceConfig, WeightingConfig, PaperV2Config, SD15Config
+from .config import FeatureConfig, ReferenceConfig, WeightingConfig, PaperV2Config, SD15Config,FFHQSamplingConfig
+
+
+def __getattr__(name):
+    if name=='Module1CloseConfig':
+        from .module1_close import Module1CloseConfig
+        return Module1CloseConfig
+    raise AttributeError(name)
+
+
+def close_module1(*args,**kwargs):
+    from .module1_close import close_module1 as run
+    return run(*args,**kwargs)
 
 
 def build_reference_bundle(*args, **kwargs):

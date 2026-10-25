@@ -248,7 +248,7 @@ def _load_fairface_supplement(root):
     return pd.DataFrame(rows)
 
 
-def load_ffhq_manifest(root,labels_path=None,min_conf=.6,max_per_group=None,seed=2026):
+def load_ffhq_manifest(root,labels_path=None,min_conf=.6,max_per_group=None,seed=2026,*,sampling=None):
     """Official groups: 0-2,3-6,7-9,10-14,15-19,20-29,30-39,40-49,50-69,70-120.
 
     Midpoints are literal arithmetic means; last midpoint is 95, not a
@@ -263,7 +263,9 @@ def load_ffhq_manifest(root,labels_path=None,min_conf=.6,max_per_group=None,seed
     if not set(df.age_group.astype(str))<=allowed:raise ValueError('Unknown FFHQ age group convention')
     df['age']=[np.mean(list(map(float,x.split('-')))) for x in df.age_group]
     if max_per_group:
-        df=pd.concat([g.sample(min(len(g),max_per_group),random_state=seed) for _,g in df.groupby('age_group')])
+        threshold=(sampling.get('all_groups_at_or_above') if isinstance(sampling,dict) else sampling.all_groups_at_or_above) if sampling else None
+        df=pd.concat([g if threshold is not None and int(str(label).split('-')[0])>=threshold
+            else g.sample(min(len(g),max_per_group),random_state=seed) for label,g in df.groupby('age_group')])
     photos=root/'images' if (root/'images').is_dir() else root
     images={}
     for path in photos.rglob('*'):
@@ -284,8 +286,9 @@ def fit_reference_frames(colombia,proxy,attributes,knots,mean,sd,icc,feature_con
     pv=(proxy[columns].to_numpy(float)-mean)/sd
     q=colombia.reindex(columns=CAPTURE,fill_value=0).to_numpy(float)
     age=colombia.age.to_numpy(float);ids=colombia.identity_id.to_numpy(dtype=str)
-    coef,capture=fit_panel_fe(age,cv,ids,knots,q)
-    unadjusted,_=fit_panel_fe(age,cv,ids,knots)
+    within=~np.char.startswith(ids.astype(str),'fairface::')
+    coef,capture=fit_panel_fe(age[within],cv[within],ids[within],knots,q[within])
+    unadjusted,_=fit_panel_fe(age[within],cv[within],ids[within],knots)
     mu=np.full_like(coef,np.nan)
     for j in range(len(attributes)):
         valid=np.isfinite(cv[:,j])&np.isfinite(q).all(1)
@@ -296,7 +299,7 @@ def fit_reference_frames(colombia,proxy,attributes,knots,mean,sd,icc,feature_con
     return ReferenceBundle(np.asarray(knots,float),coef,mu,p_age,p_mu,np.asarray(mean),np.asarray(sd),
         list(attributes),np.asarray(icc),feature_config_hash,(max(float(age.min()),float(knots[0])),min(float(age.max()),float(knots[-1]))),
             metadata=metadata or {},training_data=dict(c_age=age,c_phi=cv,c_ids=ids,c_capture=q,
-            capture_coef=capture,f_coeff_unadjusted=unadjusted,
+            capture_coef=capture,f_coeff_unadjusted=unadjusted,c_longitudinal=within,
             p_age=proxy.age.to_numpy(float),p_phi=pv))
 
 
@@ -306,10 +309,14 @@ def build_reference_bundle(config,*,feature_backend=None,landmark_backend=None):
     Missing/low ICC excludes features, not a fallback to perfect reliability.
     No test images may influence means, scales, PCA, ICC, or population curves.
     """
+    if config.module1_close:
+        from .module1_close import close_module1,Module1CloseConfig
+        return close_module1(Module1CloseConfig.from_reference(config),
+            feature_backend=feature_backend,landmark_backend=landmark_backend)['references']
     colombia=load_colombia_manifest(config)  # Leakage check precedes every backend.
     if config.feature_backend!='handcrafted' and feature_backend is None:raise ValueError('Supply a fitted robustness feature_backend explicitly')
     root=Path(config.output_dir);root.mkdir(parents=True,exist_ok=True)
-    proxy=load_ffhq_manifest(config.ffhq_aging_root,config.ffhq_labels_path,config.ffhq_min_conf,config.ffhq_max_per_group,config.seed)
+    proxy=load_ffhq_manifest(config.ffhq_aging_root,config.ffhq_labels_path,config.ffhq_min_conf,config.ffhq_max_per_group,config.seed,sampling=config.ffhq_sampling)
     store=FeatureStore(root/'feature_cache',config.features,landmark_backend,feature_backend,config.resume)
     def extract(df):
         rows=[];failures=[]
@@ -329,7 +336,8 @@ def fit_reference_feature_frames(config,c,p,feature_config_hash):
     if c.empty or p.empty:raise ValueError('No reference features extracted; inspect reference_failures.csv and landmark backend')
     attrs=[k[5:] for k in c if k.startswith('phi__')]
     quality=[]
-    for population,frame in [('colombia_train',c),('ffhq_proxy',p)]:
+    closing=config.features.version=='module1-close-v2'
+    for population,frame in [('latam' if closing else 'colombia_train',c),('ffhq' if closing else 'ffhq_proxy',p)]:
         phi=frame[['phi__'+a for a in attrs]]
         quality.append(dict(population=population,n_extracted=len(frame),
             n_pose_excluded=int(frame.get('pose_quality_ok',pd.Series(True,index=frame.index)).eq(False).sum()),

@@ -16,8 +16,16 @@ class FeatureConfig:
     max_smile_score: float | None = None
     max_jaw_open_score: float | None = None
     normalize_color_illumination: bool = False
+    new_attributes: tuple = ()
+    resolution_matching: bool = False
+    resolution_target_percentile: float = 10.
+    target_iod_px: float | None = None
+    flip_tta: bool = False
+    zone_transform: dict = field(default_factory=dict)
 
     def __post_init__(self):
+        if not 0 <= self.resolution_target_percentile <= 100:raise ValueError('Invalid resolution percentile')
+        if self.target_iod_px is not None and self.target_iod_px<=0:raise ValueError('target_iod_px must be positive')
         if self.max_abs_yaw is not None and not 0 < self.max_abs_yaw <= 90:
             raise ValueError('max_abs_yaw must be in (0, 90]')
         for value in [self.max_smile_score,self.max_jaw_open_score]:
@@ -32,6 +40,11 @@ class WeightingConfig:
     identity_balance: bool = True
     operational_target: tuple | list | None = None
     min_bin_n: int = 10
+
+
+@dataclass
+class FFHQSamplingConfig:
+    all_groups_at_or_above: float = 40.
 
 
 @dataclass
@@ -67,6 +80,12 @@ class ReferenceConfig:
     embedding_batch_size: int = 16
     # Optional cross-sectional supplement; never synthetic longitudinal pairs.
     fairface_root: str | Path | None = None
+    module1_close: bool = False
+    ffhq_sampling: FFHQSamplingConfig | dict | None = None
+    zone_indices: bool = False
+    previous_reference_dir: str | Path | None = None
+    module1_allow_download: bool = False
+    module1_assets_root: str | Path = '/content/evaluation_models_v2'
 
     def __post_init__(self):
         if self.retest_min_age is not None and not 0 <= self.retest_min_age <= 120:

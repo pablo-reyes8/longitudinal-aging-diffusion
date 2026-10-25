@@ -80,16 +80,24 @@ def prepare_embedding_reference_backend(reference_config,*,root='/content/evalua
     from src.aging_bias.references import load_colombia_manifest,load_ffhq_manifest
     from src.aging_bias.embedding_features import DinoV2Encoder,fit_reference_embedding
     config=reference_config
+    if config.module1_close and config.ffhq_sampling is None:
+        from dataclasses import replace
+        from src.aging_bias.config import FFHQSamplingConfig
+        config=replace(config,ffhq_sampling=FFHQSamplingConfig())
     if reference_frames_path is None:
         colombia=load_colombia_manifest(config)
         proxy=load_ffhq_manifest(config.ffhq_aging_root,config.ffhq_labels_path,
-            config.ffhq_min_conf,config.ffhq_max_per_group,config.seed)
+            config.ffhq_min_conf,config.ffhq_max_per_group,config.seed,
+            **({'sampling':config.ffhq_sampling} if config.ffhq_sampling is not None else {}))
     else:
         from src.aging_bias.cached_references import load_saved_reference_frames
         _,_,colombia,proxy=load_saved_reference_frames(reference_frames_path,excluded_test_ids)
     if landmark_backend is None:
         prepared=prepare_reference_backend(root,feature_config=config.features,allow_download=allow_download)
         landmark_backend=prepared['landmark_backend']
+    if config.module1_close:
+        from src.aging_bias.module1_close import prepare_closure_features
+        config,landmark_backend=prepare_closure_features(config,landmark_backend)
     if encoder is None:
         if device=='auto':
             import torch

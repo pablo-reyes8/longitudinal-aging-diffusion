@@ -41,13 +41,14 @@ class MediaPipeLandmarks:
                 'jaw':[234,93,132,58,172,136,150,149,152,378,379,365,397,288,361,323,454],
                 'left_brow':[70,63,105,66,107], 'right_brow':[336,296,334,293,300],
                 'nose':[1], 'chin':[152]}
+        groups.update(malar=[116,345],mouth_corners=[61,291],zygomatic=[234,454])
         scores={c.category_name:float(c.score) for c in result.face_blendshapes[0]} if result.face_blendshapes else {}
         yaw=np.nan
         if result.facial_transformation_matrixes:
             matrix=np.asarray(result.facial_transformation_matrixes[0],float)[:3,:3]
             u,_,vt=np.linalg.svd(matrix);rotation=u@vt
             yaw=float(np.degrees(np.arctan2(-rotation[2,0],np.hypot(rotation[0,0],rotation[1,0]))))
-        return {**{k:points[v] for k,v in groups.items()},'_quality':dict(yaw_deg=yaw,
+        return {**{k:points[v] for k,v in groups.items()},'_mesh':points,'_quality':dict(yaw_deg=yaw,
             smile_score=max(scores.get('mouthSmileLeft',np.nan),scores.get('mouthSmileRight',np.nan)),
             jaw_open_score=scores.get('jawOpen',np.nan))}
 
@@ -59,6 +60,48 @@ class PreparedImage:
     image: Image.Image
     landmarks: dict
     covariates: dict
+
+
+# Mirror permutations for exactly the MediaPipe indices consumed above.
+# Full 468/478 meshes are not remapped or used as descriptor inputs.
+MIRROR_GROUPS={
+    'left_eye':('right_eye',[3,2,1,0,5,4]),
+    'right_eye':('left_eye',[3,2,1,0,5,4]),
+    'left_brow':('right_brow',[4,3,2,1,0]),
+    'right_brow':('left_brow',[4,3,2,1,0]),
+    'mouth':('mouth',[4,3,2,1,0,7,6,5]),
+    'malar':('malar',[1,0]),'zygomatic':('zygomatic',[1,0]),
+    'mouth_corners':('mouth_corners',[1,0]),
+}
+
+
+def mirror_landmarks(landmarks,width):
+    result={}
+    for key,value in landmarks.items():
+        if key.startswith('_'):continue
+        source,order=MIRROR_GROUPS.get(key,(key,None))
+        if source not in landmarks:continue
+        v=np.asarray(landmarks[source],float).copy()
+        if key=='jaw':v=v[::-1]
+        elif order is not None:
+            # Injected lightweight backends may use three-point brow groups.
+            v=v[order] if len(v)==len(order) else v[::-1]
+        v[:,0]=width-1-v[:,0];result[key]=v
+    return result
+
+
+def match_effective_resolution(image,*,original_iod,aligned_iod,target_iod):
+    """Additional degradation only; a below-target input is returned unchanged.
+
+    Area reduction fixes effective eye sampling, followed by canonical-size
+    bicubic restoration. The latter is a display/crop grid, not new detail.
+    """
+    if not np.isfinite([original_iod,aligned_iod,target_iod]).all() or min(original_iod,aligned_iod,target_iod)<=0:
+        raise ValueError('Need finite positive interocular distances')
+    if original_iod<=target_iod or aligned_iod<=target_iod:return image.copy()
+    ratio=target_iod/aligned_iod
+    size=tuple(max(2,round(s*ratio)) for s in image.size)
+    return image.resize(size,Image.Resampling.BOX).resize(image.size,Image.Resampling.BICUBIC)
 
 
 def normalize_local_illumination(rgb):
@@ -85,6 +128,7 @@ def preprocess_image(image, landmark_backend, config=None):
     cov=dict(is_grayscale=is_grayscale(image,config.gray_tol),
              log_min_side=float(np.log(min(image.size))),blur_laplacian_var=float(laplace(gray).var()))
     landmarks=landmark_backend(image)
+    original_iod=float(np.linalg.norm(landmarks['left_eye'].mean(0)-landmarks['right_eye'].mean(0)))
     cov.update(landmarks.get('_quality',{}))
     for name in ['yaw_deg','smile_score','jaw_open_score']:cov.setdefault(name,np.nan)
     cov['pose_quality_ok']=bool(config.max_abs_yaw is None or
@@ -104,6 +148,13 @@ def preprocess_image(image, landmark_backend, config=None):
     coeff=(inv[0,0],inv[1,0],translation[0],inv[0,1],inv[1,1],translation[1])
     aligned=image.transform((config.crop_size,config.crop_size),Image.Transform.AFFINE,coeff,
                             resample=Image.Resampling.BICUBIC)
+    if config.resolution_matching:
+        if config.target_iod_px is None:raise ValueError('Calibrate target_iod_px on latam train before extraction')
+        aligned=match_effective_resolution(aligned,original_iod=original_iod,
+            aligned_iod=scale*original_iod,target_iod=config.target_iod_px)
+    cov.update(original_iod_px=original_iod,
+        effective_iod_px=min(original_iod,config.target_iod_px) if config.resolution_matching else original_iod,
+        below_target_resolution=bool(config.resolution_matching and original_iod<config.target_iod_px))
     pixels=np.asarray(aligned,float)
     if config.harmonize_sigma:
         pixels=gaussian_filter(pixels,(config.harmonize_sigma,config.harmonize_sigma,0))

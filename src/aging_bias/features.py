@@ -12,7 +12,7 @@ import pandas as pd
 from PIL import Image, ImageDraw
 from scipy.ndimage import gaussian_filter
 from src.quantitative_metrics.image_io import ImageResolver
-from .preprocessing import preprocess_image, is_grayscale, normalize_local_illumination
+from .preprocessing import preprocess_image, is_grayscale, normalize_local_illumination,mirror_landmarks
 from .config import FeatureConfig
 
 ATTRIBUTE_IDS=('wrinkle_forehead','wrinkle_periocular','wrinkle_nasolabial','wrinkle_perioral',
@@ -20,9 +20,11 @@ ATTRIBUTE_IDS=('wrinkle_forehead','wrinkle_periocular','wrinkle_nasolabial','wri
     'geom_eye_aperture','geom_brow_eye','geom_lower_third')
 COLOR_ATTRIBUTES={'skin_ita','hair_gray'}
 EXPRESSION_ATTRIBUTES={'wrinkle_periocular','wrinkle_nasolabial','wrinkle_perioral',
-    'geom_eye_aperture','geom_lip_thickness','geom_brow_eye'}
+    'geom_eye_aperture','geom_lip_thickness','geom_brow_eye','geom_malar_descent','geom_midface_height'}
 ATTRIBUTE_REGISTRY={k:dict(id=k,requires_color=k in COLOR_ATTRIBUTES,
     region=k.split('_',1)[-1]) for k in ATTRIBUTE_IDS}
+ATTRIBUTE_REGISTRY.update({k:dict(id=k,requires_color=False,region='midface')
+    for k in ['geom_malar_descent','geom_midface_height']})
 
 
 def stable_hash(value):
@@ -44,6 +46,35 @@ def geometry_attributes(l):
     out['geom_brow_eye']=(dist(l['left_brow'].mean(0),le)+dist(l['right_brow'].mean(0),re))/(2*inter)
     out['geom_lower_third']=dist(mouth.mean(0),l['chin'].mean(0))/dist(jaw[0],jaw[-1])
     return out
+
+
+NEW_GEOMETRY=('geom_malar_descent','geom_midface_height')
+
+
+def additional_geometry_attributes(l):
+    """Signed malar height toward mouth; geometry in an eye-oriented frame."""
+    out={k:np.nan for k in (*NEW_GEOMETRY,'geom_malar_descent_rel')}
+    required=['left_eye','right_eye','malar','mouth_corners','zygomatic']
+    if any(k not in l or not np.isfinite(l[k]).all() for k in required):return out
+    le,re=l['left_eye'].mean(0),l['right_eye'].mean(0)
+    eye=(le+re)/2;mouth=np.mean(l['mouth_corners'],axis=0)
+    axis=re-le;iod=np.linalg.norm(axis);width=np.linalg.norm(l['zygomatic'][1]-l['zygomatic'][0])
+    if min(iod,width)<1e-9:return out
+    normal=np.array([-axis[1],axis[0]])/iod
+    if (mouth-eye)@normal<0:normal=-normal
+    depth=float(np.mean((l['malar']-eye)@normal));gap=float((mouth-eye)@normal)
+    out.update(geom_malar_descent=depth/iod,geom_midface_height=float(np.linalg.norm(mouth-eye)/width),
+        geom_malar_descent_rel=depth/gap if gap>1e-9 else np.nan)
+    return out
+
+
+def average_tta(original,flipped):
+    values={};single=False
+    for key in original.keys()|flipped.keys():
+        a,b=original.get(key,np.nan),flipped.get(key,np.nan)
+        valid=np.isfinite([a,b]);single|=bool(valid.sum()==1)
+        values[key]=float(np.mean(np.array([a,b])[valid])) if valid.any() else np.nan
+    return values,single
 
 
 def rgb_to_lab(rgb):
@@ -83,6 +114,11 @@ def region_masks(shape,l):
 class HandcraftedFeatureBackend:
     cache_id='handcrafted-v1'
     attribute_ids=ATTRIBUTE_IDS
+    def __init__(self,new_attributes=()):
+        if set(new_attributes)-set(NEW_GEOMETRY):raise ValueError('Unknown additional geometric attributes')
+        self.new_attributes=tuple(new_attributes)
+        self.attribute_ids=ATTRIBUTE_IDS+self.new_attributes
+        if self.new_attributes:self.cache_id='handcrafted-cheek-v2'
     def extract_aligned(self,image,landmarks,allow_color=True,*,normalize_color=False):
         rgb=np.asarray(image.convert('RGB'),float);gray=rgb@np.array([.2126,.7152,.0722])/255
         local_mean=gaussian_filter(gray,5)
@@ -107,16 +143,26 @@ class HandcraftedFeatureBackend:
                 val=color.max(-1)/255;sat=(color.max(-1)-color.min(-1))/np.maximum(color.max(-1),1)
                 out['phi__hair_gray']=float(np.mean((sat[hair]<.15)&(val[hair]>.55)))
         out.update({'phi__'+k:v for k,v in geometry_attributes(landmarks).items()})
+        if self.new_attributes:
+            new=additional_geometry_attributes(landmarks)
+            out.update({'phi__'+k:new[k] for k in self.new_attributes})
+            out['diagnostic__geom_malar_descent_rel']=new['geom_malar_descent_rel']
         return out
 
 
 class FeatureStore:
     def __init__(self,cache_dir,config=None,landmark_backend=None,feature_backend=None,resume=True):
-        self.config=config or FeatureConfig();self.backend=feature_backend or HandcraftedFeatureBackend()
+        self.config=config or FeatureConfig();self.backend=feature_backend or HandcraftedFeatureBackend(self.config.new_attributes)
+        if isinstance(self.backend,HandcraftedFeatureBackend) and self.backend.new_attributes!=tuple(self.config.new_attributes):
+            self.backend=HandcraftedFeatureBackend(self.config.new_attributes)
         self.landmarks=landmark_backend
         self.root=Path(cache_dir);self.root.mkdir(parents=True,exist_ok=True)
         self.resolver=ImageResolver();self.resume=resume
         configuration=asdict(self.config)
+        # Preserve the exact legacy hash when new opt-in fields are disabled.
+        for key,default in dict(new_attributes=(),resolution_matching=False,resolution_target_percentile=10.,
+                target_iod_px=None,flip_tta=False,zone_transform={}).items():
+            if configuration[key]==default or (key=='new_attributes' and not configuration[key]):configuration.pop(key)
         task=configuration.pop('landmark_model_path',None)
         if task and Path(task).is_file():configuration['landmark_model_sha256']=hashlib.sha256(Path(task).read_bytes()).hexdigest()
         else:configuration['landmark_model_sha256']=None
@@ -140,6 +186,13 @@ class FeatureStore:
             reject=not prepared.covariates['pose_quality_ok'] or (not prepared.covariates['expression_quality_ok'] and
                 any(a.startswith('embedding_') for a in ids))
             values={'phi__'+a:np.nan for a in ids} if reject and ids else self.backend.extract_aligned(prepared.image,prepared.landmarks,**kwargs)
+            if self.config.flip_tta:
+                base=dict(values)
+                flipped={'phi__'+a:np.nan for a in ids} if reject and ids else self.backend.extract_aligned(
+                    prepared.image.transpose(Image.Transpose.FLIP_LEFT_RIGHT),mirror_landmarks(prepared.landmarks,prepared.image.width),**kwargs)
+                values,single=average_tta(base,flipped)
+                values.update({'no_tta__'+k[5:]:v for k,v in base.items() if k.startswith('phi__')})
+                values['tta_single']=single
             row={**values,**prepared.covariates}
         if not row.get('pose_quality_ok',True):
             row.update({k:np.nan for k in row if k.startswith('phi__')})
@@ -147,6 +200,11 @@ class FeatureStore:
             # For embeddings expression cannot be isolated to selected coordinates.
             row.update({k:np.nan for k in row if k.startswith('phi__') and
                 (k[5:] in EXPRESSION_ATTRIBUTES or k[5:].startswith('embedding_'))})
+        for key in list(row):
+            if key.startswith('no_tta__') and not np.isfinite(row.get('phi__'+key[8:],np.nan)):row[key]=np.nan
+        if self.config.zone_transform:
+            from .zones import zone_values
+            row.update(zone_values(row,self.config.zone_transform))
         row={**row,'image_sha256':digest,'feature_config_hash':self.config_hash}
         temp=file.with_suffix('.tmp');temp.write_text(json.dumps(row,default=float,allow_nan=True));temp.replace(file)
         return row
