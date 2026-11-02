@@ -90,7 +90,8 @@ class OperationalStore:
             except Exception:
                 pass  # per-image retry records exact exceptions, never fabricates values
             pending.clear()
-        for path in paths:
+        for i,path in enumerate(paths,1):
+            if i%100==0:print(f'[paper v2 operational prefetch] {i}/{len(paths)} image paths scanned (cached items reused)',flush=True)
             try:
                 image,digest=self.resolver.load(path);self.resolver._cache.clear()
                 if digest in seen:continue
@@ -126,7 +127,10 @@ def _operational_summary(frame,weights,model,subset,panel,delta_bin='all'):
 
 
 def evaluate_paper_v2(config,*,bundle,reference_bundle=None):
-    """Recalculate metrics from saved images. Models stay CPU/resident in bundle.
+    """Recalculate metrics from saved images. Operational critics stay on CPU.
+
+    Closed module-1 references select observed longitudinal zone errors; DINO
+    descriptors may run on GPU. Earlier references retain legacy decomposition.
 
     Main panel is the common feature-valid intersection; full per-model panels
     are reported separately. Missing attributes remain NaN. Bootstrap intervals
@@ -142,7 +146,10 @@ def evaluate_paper_v2(config,*,bundle,reference_bundle=None):
     backend=bundle['independent_age_backend']
     assert_independent_age(getattr(backend,'name',config.independent_age_name),config.models)
     assert_independent_age(type(backend).__name__,config.models)
-    output=Path(config.output_dir);output.mkdir(parents=True,exist_ok=True)
+    output=Path(config.output_dir)
+    refroot=Path(config.reference_bundle_path).resolve();destination=output.resolve()
+    if destination==refroot or refroot in destination.parents:raise ValueError('Module 1 is read-only: choose a separate module-2 output directory')
+    output.mkdir(parents=True,exist_ok=True)
     checks=run_self_checks(output/'validation')
     if not checks.passed.all():raise RuntimeError('Synthetic self-checks failed; evaluation stopped before any network execution')
     ref=reference_bundle or ReferenceBundle.load(config.reference_bundle_path,load_training_data=False)
@@ -238,6 +245,9 @@ def evaluate_paper_v2(config,*,bundle,reference_bundle=None):
             rows.append(row);paths.append(dict(sample,model_name=model,generated_path=row['generated_path']))
         if (i+1)%20==0:print(f'[paper v2] descriptors/metrics {i+1}/{len(panel)}',flush=True)
     per=pd.DataFrame(rows)
+    if ref.metadata.get('module1_close'):
+        from .zone_paper import finalize_zone_paper
+        return finalize_zone_paper(per,config,ref,store,operational,failures,panel,paths)
     valid_sets=[set(per.loc[(per.model_name==m)&per.feature_valid&per.operational_valid,'sample_id']) for m in models+['source_noedit','oracle_target']]
     common=set.intersection(*valid_sets)
     ids=sorted(common)

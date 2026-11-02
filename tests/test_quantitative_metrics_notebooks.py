@@ -23,8 +23,10 @@ def test_comparison_notebook_is_sweeps_only_and_paper_metrics_are_separate():
     assert "metrics=False" in source
     assert "evaluate_test_set(" not in source
     paper = _source("notebooks/Paper_comparison_bias_v2.ipynb")
-    assert "evaluate_paper_v2" in paper and "run_sd15_before_after" in paper
-    assert "ANCHORS_REVIEWED = False" in paper
+    assert "run_paper_analysis" in paper and "run_sd15_before_after" in paper
+    # Closed module-1 bundles use observed target errors, not the old D/pi
+    # anchor gate. The notebook checks real zones before any generation.
+    assert "preflight_zone_protocol" in paper
 
 
 def test_ablation_metrics_notebook_keeps_training_resolution_for_inference():

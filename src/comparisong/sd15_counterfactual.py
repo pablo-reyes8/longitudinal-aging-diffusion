@@ -101,6 +101,8 @@ def run_sd15_before_after(config,*,bundle=None,infer_backend=None):
     panel=panel[panel.delta_age>0].sort_values(['delta_age','sample_id'],ascending=[False,True])
     if config.max_pairs is not None:panel=panel.head(config.max_pairs)
     if panel.empty:raise ValueError('No aging transitions for SD1.5 counterfactual')
+    print(f'[SD15 paired] {len(panel)} aging transitions × {len(config.strengths)} strengths × 2 conditions; '
+        'compatible saved images are resumed, not regenerated.',flush=True)
     protected={'bundle','image','source_age','target_age','strength','seed','mode','generator','use_inverse_diffusion','use_delta_dependent_strength'}
     if protected&set(config.inference_config):raise ValueError('inference_config overrides paired protocol: '+str(protected&set(config.inference_config)))
     signature=stable_hash(dict(checkpoint_sha256=file_hash(config.checkpoint_path),strengths=config.strengths,
@@ -155,6 +157,7 @@ def run_sd15_before_after(config,*,bundle=None,infer_backend=None):
                         rows.append(row);failures.append(row.copy())
                     elif valid:rows.append(row)
                     else:pending.append((sample,path,marker,key,row))
+                print(f'[SD15 paired] {name}: {len(pending)} pending / {len(panel)} requested',flush=True)
                 if not pending:continue
                 if live is None:live=load_counterfactual_bundle(config.checkpoint_path,device=config.device,local_files_only=config.local_files_only)
                 if '_sd15_original_conv_in' not in live:raise ValueError('Use load_counterfactual_bundle: pristine conv_in is required for genuine SD1.5')
@@ -162,12 +165,12 @@ def run_sd15_before_after(config,*,bundle=None,infer_backend=None):
                     from src.inference import infer_face_aging_direct
                     infer_backend=infer_face_aging_direct
                 if not device_active:
-                    for key in ['unet','vae','text_encoder','age_delta_conditioner']:
+                    for key in ['unet','vae','text_encoder','age_delta_conditioner','age_conditioner']:
                         if live.get(key) is not None:live[key].to(config.device)
                     device_active=True
                 context=adapters_disabled(live) if condition=='vanilla' else nullcontext(live)
                 with context:
-                    for sample,path,marker,key,row in pending:
+                    for number,(sample,path,marker,key,row) in enumerate(pending,1):
                         try:
                             options=dict(config.inference_config)
                             options.update(compute_diagnostics=False,output_type='pil',return_dict=True)
@@ -184,9 +187,11 @@ def run_sd15_before_after(config,*,bundle=None,infer_backend=None):
                         rows.append(row)
                         pd.DataFrame(rows).to_csv(output/'prediction_manifest.csv',index=False)
                         pd.DataFrame(failures).to_csv(output/'inference_failures.csv',index=False)
+                        if number==1 or number%10==0 or number==len(pending):
+                            print(f'[SD15 paired] {name}: {number}/{len(pending)} | {sample["sample_id"]}: {row["inference_status"]}',flush=True)
     finally:
         if live is not None:
-            for key in ['unet','vae','text_encoder','age_delta_conditioner']:
+            for key in ['unet','vae','text_encoder','age_delta_conditioner','age_conditioner']:
                 if live.get(key) is not None:live[key].to('cpu')
     frame=pd.DataFrame(rows);frame.to_csv(output/'prediction_manifest.csv',index=False)
     pd.DataFrame(failures,columns=[*panel.columns,'model_name','inference_status','inference_error']).to_csv(output/'inference_failures.csv',index=False)

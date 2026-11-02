@@ -14,6 +14,60 @@ from src.aging_bias.config import PaperV2Config,FeatureConfig,WeightingConfig
 from src.aging_bias.cached_references import refit_cached_references,build_cached_embedding_references,preflight_dino_inputs
 from src.aging_bias.weighting import transition_weights
 from .evaluate_paper_v2 import evaluate_paper_v2,load_test_panel,_generated_path
+from .frozen_dino import load_frozen_dino_backend
+
+
+def _run_closed_zone_analysis(config,*,bundle,picking_config,assets_root,allow_download,dino_device):
+    root=Path(config.output_dir);refroot=Path(config.reference_bundle_path).resolve()
+    if root.resolve()==refroot or refroot in root.resolve().parents:raise ValueError('Module-1 references are read-only; choose a separate module-2 output')
+    roots=dict(config.generated_roots)
+    if picking_config is not None:
+        for name in ['ours_picking_no_prompt','ours_picking_prompt']:
+            if name in config.models:roots[name]=Path(picking_config.output_dir)/'generated'/name
+    config=replace(config,generated_roots=roots,cache_dir=config.cache_dir or root/'cache',robustness_backend=None)
+    out=root/'diagnostics';out.mkdir(parents=True,exist_ok=True)
+    state=dict(protocol='observed-longitudinal-zone-error-v1',complete=False,passed=False,
+        required_backends=['handcrafted_primary','dinov2'],stages={},module1_read_only=True)
+    status=out/'analysis_status.json';dino=None
+    def persist():status.write_text(json.dumps(state,indent=2,default=str))
+    persist()
+    try:
+        panel=load_test_panel(config.test_manifest_path,config.source_root)
+        original=pd.read_csv(config.test_manifest_path,dtype={'sample_id':str,'identity_id':str})
+        for model in config.models:
+            if not any((p:=_generated_path(config,model,row,original)) is not None and p.is_file() for row in panel.to_dict('records')):
+                raise FileNotFoundError(f'No saved images for {model}; correct generated_roots. No picking is generated here.')
+        # Fail frozen-asset/model compatibility BEFORE expensive primary metrics.
+        dino_ref,dino=load_frozen_dino_backend(config.reference_bundle_path,root=assets_root,
+            landmark_backend=bundle.get('landmark_backend'),cache_dir=config.cache_dir,
+            allow_download=allow_download,device=dino_device)
+        if set(panel.identity_id.astype(str))&set(dino_ref.metadata.get('train_identities',[])):
+            raise ValueError('Test/reference identity leakage in frozen DINO')
+        print('\n=== 1/2 OBSERVED LONGITUDINAL ERRORS — frozen anatomical zones/components ===',flush=True)
+        ref=ReferenceBundle.load(config.reference_bundle_path,load_training_data=False)
+        primary=evaluate_paper_v2(config,bundle=bundle,reference_bundle=ref)
+        state['stages']['handcrafted_primary']=primary['zone_validation'];persist()
+        print('\n=== 2/2 DINO ROBUSTNESS — latent coordinates, NOT anatomical zones ===',flush=True)
+        dino_config=replace(config,output_dir=root/'dinov2',reference_bundle_path=Path(config.reference_bundle_path)/'dinov2',
+            features=dino['feature_config'])
+        robust=evaluate_paper_v2(dino_config,bundle={**bundle,**dino},reference_bundle=dino_ref)
+        state['stages']['dinov2']=robust['zone_validation']
+        state.update(complete=True,passed=all(stage['passed'] for stage in state['stages'].values()),
+            note='Validation of observed measurement pipeline, NOT D/pi identification or causal demographic bias.')
+        persist()
+        print('\nZone evaluation complete. Frozen module-1 references were not changed.',flush=True)
+        return dict(**primary,analyses={'handcrafted_primary':primary,'dinov2':robust},
+            analysis_status=state,analysis_status_path=str(status))
+    except BaseException as exc:
+        state.update(complete=False,passed=False,error=f'{type(exc).__name__}: {exc}');persist();raise
+    finally:
+        if dino is not None:
+            encoder=getattr(dino.get('feature_backend'),'encoder',None)
+            if hasattr(encoder,'to'):
+                encoder.to('cpu')
+                if str(dino.get('embedding_device','')).startswith('cuda'):
+                    import torch
+                    torch.cuda.empty_cache()
 
 
 def write_analysis_diagnostics(result,config):
@@ -84,6 +138,10 @@ def write_analysis_diagnostics(result,config):
 def run_paper_analysis(config,*,bundle,picking_config=None,assets_root='/content/evaluation_models_v2',allow_download=False,dino_device='auto'):
     """One notebook call; reuses saved generated images and metric caches.
 
+    Closed module-1 references use observed longitudinal errors and read-only
+    frozen DINO. They never rebuild module 1 or depend on legacy D/pi anchors.
+    The following three-stage policy is retained for earlier reference bundles.
+
     Primary thresholds remain those saved in module 1. ICC .30 is a separately
     labeled sensitivity; homogenization keeps .50. DINO is mandatory, never
     silently skipped. If it fails, earlier results persist but complete/passed
@@ -97,6 +155,10 @@ def run_paper_analysis(config,*,bundle,picking_config=None,assets_root='/content
     raw['features']=FeatureConfig(**raw['features'])
     raw['weighting']=WeightingConfig(**raw['weighting'])
     config=PaperV2Config(**raw)
+    ref=ReferenceBundle.load(config.reference_bundle_path,load_training_data=False)
+    if ref.metadata.get('module1_close'):
+        return _run_closed_zone_analysis(config,bundle=bundle,picking_config=picking_config,
+            assets_root=assets_root,allow_download=allow_download,dino_device=dino_device)
     root=Path(config.output_dir);out=root/'diagnostics';out.mkdir(parents=True,exist_ok=True)
     state=dict(complete=False,passed=False,required_backends=['handcrafted_primary','handcrafted_icc030','dinov2'],stages={})
     def persist():
