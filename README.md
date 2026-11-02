@@ -142,8 +142,6 @@ Forward and reverse calibration fits are tracked independently. A default multi-
 
 Checkpoint selection keeps two independent best models: `best/` follows validation loss, while `best_calibration_checkpoint/` minimizes `|intercept - (-3.19)| + 10|slope - 0.84|` against the real longitudinal MiVOLO benchmark. Reference identity cosine is `mean=0.532`, `median=0.589`; identity reporting itself is unchanged.
 
-The source image, seed, and guidance settings remain fixed across epochs to make visual comparisons meaningful.
-
 See notebooks/training.ipynb for the complete training setup and configuration details.
 
 Resume exactly from a training checkpoint with:
