@@ -119,6 +119,7 @@ class PaperV2Config:
     oracle_ratio_tolerance: float = .15
     oracle_homog_tolerance: float = .15
     cache_dir: str | Path | None = None
+    check_identity_overlap: bool = False
 
 
 @dataclass

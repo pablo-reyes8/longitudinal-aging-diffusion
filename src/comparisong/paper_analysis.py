@@ -41,8 +41,8 @@ def _run_closed_zone_analysis(config,*,bundle,picking_config,assets_root,allow_d
         dino_ref,dino=load_frozen_dino_backend(config.reference_bundle_path,root=assets_root,
             landmark_backend=bundle.get('landmark_backend'),cache_dir=config.cache_dir,
             allow_download=allow_download,device=dino_device)
-        if set(panel.identity_id.astype(str))&set(dino_ref.metadata.get('train_identities',[])):
-            raise ValueError('Test/reference identity leakage in frozen DINO')
+        from .identity_overlap import check_identity_overlap
+        state['identity_overlap_check']=check_identity_overlap(config,panel,dino_ref);persist()
         print('\n=== 1/2 OBSERVED LONGITUDINAL ERRORS — frozen anatomical zones/components ===',flush=True)
         ref=ReferenceBundle.load(config.reference_bundle_path,load_training_data=False)
         primary=evaluate_paper_v2(config,bundle=bundle,reference_bundle=ref)

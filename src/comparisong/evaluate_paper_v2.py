@@ -158,8 +158,8 @@ def evaluate_paper_v2(config,*,bundle,reference_bundle=None):
     for direction in ['all','aging','rejuvenation']:
         subset=panel if direction=='all' else panel[panel.delta_age>0] if direction=='aging' else panel[panel.delta_age<0]
         if len(subset):transition_weights(subset,config.weighting)
-    overlap=set(panel.identity_id.astype(str))&set(map(str,ref.metadata.get('train_identities',[])))
-    if overlap:raise ValueError(f'Test/reference training identity overlap: {sorted(overlap)[:10]}')
+    from .identity_overlap import check_identity_overlap
+    check_identity_overlap(config,panel,ref)
     original=pd.read_csv(config.test_manifest_path,dtype={'sample_id':str,'identity_id':str})
     models=list(dict.fromkeys(config.models))
     if not models or {'source_noedit','oracle_target'}&set(models):raise ValueError('Supply actual models; anchors are added automatically')

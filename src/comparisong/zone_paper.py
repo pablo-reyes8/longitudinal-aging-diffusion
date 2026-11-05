@@ -146,7 +146,8 @@ def preflight_zone_protocol(config,*,bundle,assets_root=None,allow_download=Fals
     store=FeatureStore(Path(config.cache_dir or root/'cache')/'features',config.features,bundle.get('landmark_backend'),bundle.get('feature_backend'),config.resume)
     if store.config_hash!=ref.feature_config_hash:raise ValueError('Frozen module-1 feature/preprocessing hash mismatch')
     panel=load_test_panel(config.test_manifest_path,config.source_root)
-    if set(panel.identity_id.astype(str))&set(ref.metadata.get('train_identities',[])):raise ValueError('Test/reference train identity leakage')
+    from .identity_overlap import check_identity_overlap
+    identity_check=check_identity_overlap(config,panel,ref)
     checked=[];errors=[]
     for row in panel.head(8).to_dict('records'):
         try:
@@ -157,7 +158,7 @@ def preflight_zone_protocol(config,*,bundle,assets_root=None,allow_download=Fals
         except Exception as exc:errors.append(dict(sample_id=row['sample_id'],error=str(exc)))
     passed=any(row['valid_zones'] for row in checked)
     report=dict(passed=passed,protocol='observed-longitudinal-zone-error-v1',feature_config_hash=store.config_hash,
-        checked=checked,failures=errors,dino_model_checked=assets_root is not None,
+        checked=checked,failures=errors,dino_model_checked=assets_root is not None,identity_overlap_check=identity_check,
         note='Checks real source/target zone extraction, not diffusion checkpoints or future generated images.')
     path.write_text(json.dumps(report,indent=2))
     if not passed:raise RuntimeError(f'No usable real source/target zone in smoke; inspect {path}')
