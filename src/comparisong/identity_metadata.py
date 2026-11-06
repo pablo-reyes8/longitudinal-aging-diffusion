@@ -1,5 +1,26 @@
 """User-supplied identity labels for the longitudinal comparison test set."""
 
+
+def load_gender_csv(path):
+    """Read id/identity_id + gender labels; reject conflicting repeated IDs."""
+    import pandas as pd
+    frame=pd.read_csv(path,dtype=str)
+    frame.columns=frame.columns.str.strip().str.removeprefix('\ufeff')
+    identity='identity_id' if 'identity_id' in frame else 'id'
+    if identity not in frame or 'gender' not in frame:
+        raise ValueError('Gender CSV requires id (or identity_id) and gender columns')
+    aliases={'h':'male','m':'female','male':'male','female':'female',
+             'hombre':'male','mujer':'female'}
+    result={}
+    for number,row in enumerate(frame.to_dict('records'),2):
+        key=row[identity];label=row['gender']
+        if pd.isna(key) or not str(key).strip():raise ValueError(f'Missing ID in gender CSV row {number}')
+        key=str(key).strip();gender=aliases.get(str(label).strip().lower())
+        if gender is None:raise ValueError(f'Invalid gender for {key} in CSV row {number}: {label}')
+        if key in result and result[key]!=gender:raise ValueError(f'Conflicting gender labels for {key}')
+        result[key]=gender
+    return result
+
 # H = hombre (male), M = mujer (female). These are supplied labels, not predictions.
 TEST_ID_GENDERS = {
     "id_1": "male",

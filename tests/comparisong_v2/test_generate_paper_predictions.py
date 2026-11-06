@@ -63,3 +63,46 @@ def test_picking_outputs_are_copied_to_exact_evaluation_roots(tmp_path,monkeypat
     for row in result['manifest'].itertuples():
         expected=config.generated_roots[row.model_name]/row.identity_id/(row.sample_id+'.png')
         assert expected.is_file() and row.generated_path==str(expected)
+
+
+def test_fading_groups_same_source_and_csv_gender_overrides_legacy(tmp_path,monkeypatch):
+    import src.comparisong.generate_images as generator
+    config=configuration(tmp_path,['FADING'])
+    csv=tmp_path/'gender.csv'
+    csv.write_text('id,age,gender,confidence,image_path\nid_new,20,female,0.99,unused.jpg\n')
+    calls=[]
+    def generate(bundle,**kw):
+        calls.append(kw['target_ages'])
+        assert kw['gender']=='female'
+        return {'FADING':{age:Image.new('RGB',(8,8)) for age in kw['target_ages']}}
+    monkeypatch.setattr(generator,'age_image',generate)
+    result=generate_paper_predictions(config,comparison_bundle={'FADING':{'script':'unused'}},gender_csv_path=csv)
+    assert calls==[[40,60]]
+    assert list(result['manifest'].inference_status)==['ok','ok']
+    generate_paper_predictions(config,comparison_bundle={'FADING':{'script':'unused'}},gender_csv_path=csv)
+    assert calls==[[40,60]]  # Resume neither repeats inversion nor editing.
+
+
+def test_fading_group_failure_falls_back_and_explicit_gender_has_priority(tmp_path,monkeypatch):
+    import src.comparisong.generate_images as generator
+    config=configuration(tmp_path,['FADING']);csv=tmp_path/'gender.csv'
+    csv.write_text('identity_id,gender\nid_new,female\n')
+    calls=[]
+    def generate(bundle,**kw):
+        calls.append(kw['target_ages']);assert kw['gender']=='male'
+        if len(kw['target_ages'])>1:raise RuntimeError('group problem')
+        return {'FADING':{kw['target_ages'][0]:Image.new('RGB',(8,8))}}
+    monkeypatch.setattr(generator,'age_image',generate)
+    result=generate_paper_predictions(config,comparison_bundle={'FADING':{}},
+        gender_csv_path=csv,gender_by_id={'id_new':'H'})
+    assert calls==[[40,60],[40],[60]]
+    assert result['manifest'].inference_status.eq('ok').all()
+
+
+def test_gender_csv_validates_repeated_labels_and_rejects_conflicts(tmp_path):
+    from src.comparisong.identity_metadata import load_gender_csv
+    csv=tmp_path/'gender.csv';csv.write_text('id,gender\nid_1,H\nid_1,male\nid_2,M\n')
+    assert load_gender_csv(csv)=={'id_1':'male','id_2':'female'}
+    csv.write_text('id,gender\nid_1,H\nid_1,M\n')
+    with pytest.raises(ValueError,match='Conflicting'):
+        load_gender_csv(csv)

@@ -57,3 +57,4 @@ output/comparsing/*
 !output/comparsing/results/**
 output/abliations
 output/comparsing_metrics
+output/inference_gender
