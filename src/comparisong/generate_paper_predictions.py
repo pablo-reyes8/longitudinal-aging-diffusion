@@ -24,10 +24,12 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
     groups pending targets by source to reuse its original CLI inversion. A
     failed group falls back to individual requests without dropping transitions.
     """
+    print('[generate paper] Reading manifest and validating configuration...',flush=True)
     from .generate_images import age_image
     from .load_models import load_aging_models
     from .evaluation_backends_v2 import file_hash
     panel=load_test_panel(config.test_manifest_path,config.source_root)
+    print(f'[generate paper] {len(panel)} transitions / {panel.source_path.nunique()} unique source images',flush=True)
     names=list(dict.fromkeys(config.models))
     external=[n for n in names if not n.startswith('ours_')]
     supported={'SAM','FRAN','FADING','HRFAE','CUSP','Cradle2Cane'}
@@ -63,6 +65,10 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
     if {'bundle','image','source_age','target_age','strength','device','compute_diagnostics','return_dict','output_type'}&set(options):
         raise ValueError('inference_config contains reserved generation arguments')
     rows=[];resolver=ImageResolver();own=None;active=False
+    # Files are immutable inputs during a run. Keep only their small digests,
+    # not decoded images, across transitions/models. Re-read on the next run.
+    source_digests={}
+    if direct:print('[generate paper] Hashing adapter checkpoint for safe resume...',flush=True)
     checkpoint_hash=file_hash(checkpoint_path) if direct else None
     def persist():
         pd.DataFrame(rows).to_csv(out/'prediction_manifest.csv',index=False)
@@ -70,11 +76,17 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
     try:
         for name in external+direct:
             pending=[]
-            for sample in panel.to_dict('records'):
+            print(f'[generate paper] {name}: checking inputs and saved outputs...',flush=True)
+            for number,sample in enumerate(panel.to_dict('records'),1):
+                if number==1 or number%100==0 or number==len(panel):
+                    print(f'[resume scan] {name}: {number}/{len(panel)} | {len(source_digests)} source fingerprints cached',flush=True)
                 path=roots[name]/sample['identity_id']/(sample['sample_id']+'.png');marker=path.with_suffix('.json')
                 row={**sample,'model_name':name,'generated_path':str(path),'inference_status':'ok','inference_error':None}
                 try:
-                    digest=resolver.load(sample['source_path'])[1];resolver._cache.clear()
+                    source=sample['source_path']
+                    if source not in source_digests:
+                        source_digests[source]=resolver.load(source)[1];resolver._cache.clear()
+                    digest=source_digests[source]
                     signature=stable_hash(dict(protocol='paper-generation-v1',model=name,source=digest,
                         source_age=sample['source_age'],target_age=sample['target_age'],seed=config.seed,
                         gender=genders.get(sample['identity_id']) if name in {'FADING','Cradle2Cane'} else None,

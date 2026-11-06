@@ -19,6 +19,11 @@ def test_exact_manifest_failure_persistence_and_resume(tmp_path,monkeypatch):
     import src.comparisong.load_models as loader
     from src.comparisong.resident_models import ACTIVE_MODEL_SESSION
     config=configuration(tmp_path,['SAM']);calls=[]
+    from src.quantitative_metrics.image_io import ImageResolver
+    load=ImageResolver.load;reads=[]
+    def counted_load(self,path):
+        reads.append(str(path));return load(self,path)
+    monkeypatch.setattr(ImageResolver,'load',counted_load)
     def generate(bundle,**kw):
         assert ACTIVE_MODEL_SESSION.get().name=='SAM'
         assert not kw['metrics']
@@ -30,8 +35,10 @@ def test_exact_manifest_failure_persistence_and_resume(tmp_path,monkeypatch):
     result=generate_paper_predictions(config)
     assert list(result['manifest'].inference_status)==['ok','failed']
     assert calls==[40,60]
+    assert len(reads)==1  # The shared source is read once, not per transition.
     generate_paper_predictions(config)
     assert calls==[40,60]
+    assert len(reads)==2  # New invocation validates the source content again.
     assert pd.read_csv(config.test_manifest_path).shape[0]==2
     assert ACTIVE_MODEL_SESSION.get() is None
 
