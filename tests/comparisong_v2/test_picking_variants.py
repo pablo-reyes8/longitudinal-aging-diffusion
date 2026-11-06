@@ -206,7 +206,7 @@ def test_reports_export_all_and_aging_for_every_model(tmp_path):
 def test_kid_is_computed_on_all_and_aging_panels_not_copied(tmp_path):
     from test_evaluator import setup
     from src.comparisong.evaluate_paper_v2 import evaluate_paper_v2
-    cfg,bundle,_=setup(tmp_path);cfg.n_boot=0
+    cfg,bundle,_=setup(tmp_path);cfg.n_boot=0;cfg.aging_only=False
     panel=pd.read_csv(cfg.test_manifest_path)
     panel.loc[:9,['source_age','target_age']]=panel.loc[:9,['target_age','source_age']].to_numpy()
     panel.to_csv(cfg.test_manifest_path,index=False)

@@ -145,7 +145,7 @@ def preflight_zone_protocol(config,*,bundle,assets_root=None,allow_download=Fals
         if hasattr(encoder,'to'):encoder.to('cpu')
     store=FeatureStore(Path(config.cache_dir or root/'cache')/'features',config.features,bundle.get('landmark_backend'),bundle.get('feature_backend'),config.resume)
     if store.config_hash!=ref.feature_config_hash:raise ValueError('Frozen module-1 feature/preprocessing hash mismatch')
-    panel=load_test_panel(config.test_manifest_path,config.source_root)
+    panel=load_test_panel(config.test_manifest_path,config.source_root,aging_only=getattr(config,'aging_only',True))
     from .identity_overlap import check_identity_overlap
     identity_check=check_identity_overlap(config,panel,ref)
     checked=[];errors=[]

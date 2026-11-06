@@ -38,7 +38,7 @@ def test_exact_manifest_failure_persistence_and_resume(tmp_path,monkeypatch):
     assert len(reads)==1  # The shared source is read once, not per transition.
     generate_paper_predictions(config)
     assert calls==[40,60]
-    assert len(reads)==2  # New invocation validates the source content again.
+    assert len(reads)==1  # Persisted fingerprint reused while size/mtime match.
     assert pd.read_csv(config.test_manifest_path).shape[0]==2
     assert ACTIVE_MODEL_SESSION.get() is None
 
@@ -113,3 +113,40 @@ def test_gender_csv_validates_repeated_labels_and_rejects_conflicts(tmp_path):
     csv.write_text('id,gender\nid_1,H\nid_1,M\n')
     with pytest.raises(ValueError,match='Conflicting'):
         load_gender_csv(csv)
+
+
+def test_aging_resume_preserves_previous_sam_and_removes_rejuvenation(tmp_path,monkeypatch):
+    import src.comparisong.generate_images as generator
+    config=configuration(tmp_path,['SAM'])
+    panel=pd.read_csv(config.test_manifest_path)
+    reverse={**panel.iloc[0].to_dict(),'sample_id':'reverse','source_age':40,'target_age':20}
+    pd.concat([panel,pd.DataFrame([reverse])],ignore_index=True).to_csv(config.test_manifest_path,index=False)
+    calls=[]
+    def generate(bundle,**kw):
+        calls.append(kw['target_ages'][0])
+        return {'SAM':{kw['target_ages'][0]:Image.new('RGB',(8,8))}}
+    monkeypatch.setattr(generator,'age_image',generate)
+    # Create a compatible previous mixed-direction run, then switch defaults.
+    config.aging_only=False
+    generate_paper_predictions(config,comparison_bundle={'SAM':{}})
+    assert calls==[40,60,20]
+    reverse_path=config.generated_roots['SAM']/'id_new'/'reverse.png'
+    assert reverse_path.is_file()
+    config.aging_only=True
+    result=generate_paper_predictions(config,comparison_bundle={'SAM':{}})
+    assert calls==[40,60,20]  # Existing aging signatures remained compatible.
+    assert result['manifest'].target_age.gt(result['manifest'].source_age).all()
+    assert not reverse_path.exists() and not reverse_path.with_suffix('.json').exists()
+    assert len(pd.read_csv(config.output_dir/'generation'/'transitions.csv'))==2
+
+
+def test_fingerprint_cache_survives_restart_and_invalidates_changed_file(tmp_path):
+    from src.comparisong.generation_cache import FingerprintCache
+    source=tmp_path/'source';source.write_bytes(b'first');calls=[]
+    def compute(path):calls.append(path);return str(len(source.read_bytes()))
+    path=tmp_path/'cache.json';cache=FingerprintCache(path)
+    assert cache.get(source,compute)=='5';cache.save()
+    cache=FingerprintCache(path)
+    assert cache.get(source,compute)=='5' and len(calls)==1
+    source.write_bytes(b'changed content')
+    assert cache.get(source,compute)=='15' and len(calls)==2

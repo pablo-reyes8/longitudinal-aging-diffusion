@@ -17,7 +17,7 @@ from src.quantitative_metrics.evaluator import _cosine,_git_commit,_safe_version
 from .critic_provenance import assert_independent_age,contamination_flags,CRITIC_PROVENANCE
 
 
-def load_test_panel(manifest_path,source_root=None):
+def load_test_panel(manifest_path,source_root=None,*,aging_only=False):
     df=pd.read_csv(manifest_path,dtype={'sample_id':str,'identity_id':str}) if not isinstance(manifest_path,pd.DataFrame) else manifest_path.copy()
     required=['sample_id','identity_id','source_age','target_age','source_path','target_path']
     if not set(required)<=set(df):raise ValueError(f'Test manifest requires {required}')
@@ -30,6 +30,9 @@ def load_test_panel(manifest_path,source_root=None):
         if not panel[k].between(0,120).all():raise ValueError('Test ages must be in [0,120]')
     panel['delta_age']=panel.target_age-panel.source_age
     if panel.empty or panel.delta_age.eq(0).any():raise ValueError('Need nonempty, nonzero longitudinal transitions')
+    if aging_only:
+        panel=panel[panel.delta_age>0].copy()
+        if panel.empty:raise ValueError('No aging transitions in test manifest')
     if source_root:
         for role in ['source','target']:
             panel[role+'_path']=[str(Path(source_root)/str(r.identity_id)/Path(getattr(r,role+'_path')).name) for r in panel.itertuples()]
@@ -154,7 +157,7 @@ def evaluate_paper_v2(config,*,bundle,reference_bundle=None):
     if not checks.passed.all():raise RuntimeError('Synthetic self-checks failed; evaluation stopped before any network execution')
     ref=reference_bundle or ReferenceBundle.load(config.reference_bundle_path,load_training_data=False)
     policy=ref.metadata.get('reliability_policy',{})
-    panel=load_test_panel(config.test_manifest_path,config.source_root)
+    panel=load_test_panel(config.test_manifest_path,config.source_root,aging_only=getattr(config,'aging_only',True))
     for direction in ['all','aging','rejuvenation']:
         subset=panel if direction=='all' else panel[panel.delta_age>0] if direction=='aging' else panel[panel.delta_age<0]
         if len(subset):transition_weights(subset,config.weighting)

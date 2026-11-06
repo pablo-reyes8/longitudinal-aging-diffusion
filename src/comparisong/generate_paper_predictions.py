@@ -29,6 +29,11 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
     from .load_models import load_aging_models
     from .evaluation_backends_v2 import file_hash
     panel=load_test_panel(config.test_manifest_path,config.source_root)
+    excluded=panel[panel.delta_age<0].copy()
+    aging_only=getattr(config,'aging_only',True)
+    if aging_only:
+        panel=panel[panel.delta_age>0].copy()
+        if panel.empty:raise ValueError('No aging transitions to generate')
     print(f'[generate paper] {len(panel)} transitions / {panel.source_path.nunique()} unique source images',flush=True)
     names=list(dict.fromkeys(config.models))
     external=[n for n in names if not n.startswith('ours_')]
@@ -53,12 +58,39 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
         missing=[i for i in panel.identity_id.unique() if not genders.get(i)]
         if missing:raise ValueError(f'Missing gender labels for {len(missing)} IDs; pass gender_csv_path or gender_by_id. First IDs: {missing[:20]}')
     out=Path(config.output_dir)/'generation';out.mkdir(parents=True,exist_ok=True)
+    if aging_only and len(excluded):
+        import shutil
+        removed=0
+        for sample in excluded.to_dict('records'):
+            for name in names:
+                for base in [roots[name],out/'picking'/'generated'/name]:
+                    path=base/sample['identity_id']/(sample['sample_id']+'.png')
+                    for artifact in [path,path.with_suffix('.json'),path.with_suffix('.tmp.png')]:
+                        if artifact.is_file():artifact.unlink();removed+=1
+                work=out/'literature'/name/sample['sample_id']
+                if work.is_dir():shutil.rmtree(work);removed+=1
+            work=out/'picking'/'picking'/sample['sample_id']
+            if work.is_dir():shutil.rmtree(work);removed+=1
+        # Remove excluded rows from progress files left by an interrupted run.
+        for path in [out/'prediction_manifest.csv',out/'inference_failures.csv',
+                     out/'picking'/'prediction_manifest.csv',out/'picking'/'inference_failures.csv']:
+            if path.is_file():
+                try:
+                    frame=pd.read_csv(path)
+                    if {'source_age','target_age'}<=set(frame):
+                        frame=frame[pd.to_numeric(frame.target_age)>pd.to_numeric(frame.source_age)]
+                        frame.to_csv(path,index=False)
+                except pd.errors.EmptyDataError:pass
+        print(f'[generate paper] Aging only: excluded {len(excluded)} rejuvenations; removed {removed} generated artifacts. Aging outputs retained.',flush=True)
+    panel.to_csv(out/'transitions.csv',index=False)
+    from .generation_cache import FingerprintCache
+    fingerprint_cache=FingerprintCache(out/'fingerprints.json')
     pd.DataFrame([dict(identity_id=i,gender=genders.get(i)) for i in panel.identity_id.unique()]).to_csv(out/'gender_by_id.csv',index=False)
     (out/'generation_config.json').write_text(json.dumps(dict(
         test_manifest_path=str(config.test_manifest_path),generated_roots={n:str(r) for n,r in roots.items()},
         gender_csv_path=str(gender_csv_path) if gender_csv_path is not None else None,
         gender_csv_sha256=file_hash(gender_csv_path) if gender_csv_path is not None else None,
-        fading_group_targets=fading_group_targets),indent=2))
+        fading_group_targets=fading_group_targets,aging_only=aging_only),indent=2))
     options=dict(image_size=400,num_inference_steps=34,seed=config.seed,
         text_reference_mode='source_age',age_guidance_scale=3.,text_guidance_scale=7.,image_guidance_scale=1.5)
     options.update(inference_config or {})
@@ -68,13 +100,15 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
     # Files are immutable inputs during a run. Keep only their small digests,
     # not decoded images, across transitions/models. Re-read on the next run.
     source_digests={}
-    if direct:print('[generate paper] Hashing adapter checkpoint for safe resume...',flush=True)
-    checkpoint_hash=file_hash(checkpoint_path) if direct else None
+    checkpoint_hash=None
     def persist():
         pd.DataFrame(rows).to_csv(out/'prediction_manifest.csv',index=False)
         pd.DataFrame([r for r in rows if r['inference_status']=='failed']).to_csv(out/'inference_failures.csv',index=False)
     try:
         for name in external+direct:
+            if name in direct and checkpoint_hash is None:
+                print('[generate paper] Checking adapter fingerprint for our direct model...',flush=True)
+                checkpoint_hash=fingerprint_cache.get(checkpoint_path,file_hash)
             pending=[]
             print(f'[generate paper] {name}: checking inputs and saved outputs...',flush=True)
             for number,sample in enumerate(panel.to_dict('records'),1):
@@ -85,7 +119,9 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
                 try:
                     source=sample['source_path']
                     if source not in source_digests:
-                        source_digests[source]=resolver.load(source)[1];resolver._cache.clear()
+                        def compute_source(path):
+                            digest=resolver.load(path)[1];resolver._cache.clear();return digest
+                        source_digests[source]=fingerprint_cache.get(source,compute_source)
                     digest=source_digests[source]
                     signature=stable_hash(dict(protocol='paper-generation-v1',model=name,source=digest,
                         source_age=sample['source_age'],target_age=sample['target_age'],seed=config.seed,
@@ -106,6 +142,7 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
                 except Exception as exc:
                     rows.append({**row,'generated_path':None,'inference_status':'failed','inference_error':str(exc)});persist()
             print(f'[generate paper] {name}: {len(pending)} pending / {len(panel)}',flush=True)
+            fingerprint_cache.save()
             if not pending:persist();continue
             if name in external:
                 if comparison_bundle is None or comparison_bundle.get(name) is None:
@@ -168,6 +205,7 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
                     rows.append(row);persist()
                     if number==1 or number%10==0 or number==len(pending):print(f'[{name}] {number}/{len(pending)}: {row["inference_status"]}',flush=True)
     finally:
+        fingerprint_cache.save()
         if active:
             for key in ['unet','vae','text_encoder','age_delta_conditioner','age_conditioner']:
                 if hasattr(own.get(key),'to'):own[key].to('cpu')
@@ -181,7 +219,7 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
         # Avoid retaining a second diffusion bundle during the picking phase.
         params={k:v for k,v in options.items() if k!='seed'}
         params.update(picking_options or {});params.setdefault('overwrite',False)
-        pc=PickingVariantsConfig(checkpoint_path=checkpoint_path,test_manifest_path=config.test_manifest_path,
+        pc=PickingVariantsConfig(checkpoint_path=checkpoint_path,test_manifest_path=out/'transitions.csv',
             output_dir=out/'picking',source_root=config.source_root,seed=config.seed,device=device,
             resume=config.resume,retry_failed=retry_failed,**params)
         selected=run_picking_variants(pc,bundle=picking_bundle)

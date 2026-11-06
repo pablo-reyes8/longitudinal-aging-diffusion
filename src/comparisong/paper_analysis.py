@@ -32,7 +32,7 @@ def _run_closed_zone_analysis(config,*,bundle,picking_config,assets_root,allow_d
     def persist():status.write_text(json.dumps(state,indent=2,default=str))
     persist()
     try:
-        panel=load_test_panel(config.test_manifest_path,config.source_root)
+        panel=load_test_panel(config.test_manifest_path,config.source_root,aging_only=getattr(config,'aging_only',True))
         original=pd.read_csv(config.test_manifest_path,dtype={'sample_id':str,'identity_id':str})
         for model in config.models:
             if not any((p:=_generated_path(config,model,row,original)) is not None and p.is_file() for row in panel.to_dict('records')):
@@ -170,7 +170,7 @@ def run_paper_analysis(config,*,bundle,picking_config=None,assets_root='/content
             for name in ['ours_picking_no_prompt','ours_picking_prompt']:
                 if name in config.models:roots[name]=Path(picking_config.output_dir)/'generated'/name
         config=replace(config,generated_roots=roots,cache_dir=config.cache_dir or root/'cache',robustness_backend=None)
-        panel=load_test_panel(config.test_manifest_path,config.source_root)
+        panel=load_test_panel(config.test_manifest_path,config.source_root,aging_only=getattr(config,'aging_only',True))
         original=pd.read_csv(config.test_manifest_path,dtype={'sample_id':str,'identity_id':str})
         for model in config.models:
             paths=(_generated_path(config,model,row,original) for row in panel.to_dict('records'))
