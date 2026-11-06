@@ -85,12 +85,14 @@ def load_counterfactual_bundle(checkpoint_path,*,device='cpu',local_files_only=T
     return bundle
 
 
-def run_sd15_before_after(config,*,bundle=None,infer_backend=None):
+def run_sd15_before_after(config,*,bundle=None,infer_backend=None,conditions=('vanilla','finetuned')):
     """Generate only when explicitly called; failures persisted per transition.
 
     This is SD1.5 backbone under the SAME project direct-img2img/CFG protocol,
     not the stock Diffusers pipeline with different guidance semantics.
     """
+    if not conditions or len(set(conditions))!=len(conditions) or set(conditions)-{'vanilla','finetuned'}:
+        raise ValueError('conditions must contain vanilla and/or finetuned without duplicates')
     if not config.anchors_reviewed:raise ValueError('Inspect real_anchors.json and set anchors_reviewed=True before the counterfactual')
     anchors=json.loads(Path(config.validation_path).read_text())
     if not anchors.get('passed'):raise ValueError('Real anchors failed/unreviewed; fix references and inspect validation before SD1.5 generation')
@@ -101,7 +103,7 @@ def run_sd15_before_after(config,*,bundle=None,infer_backend=None):
     panel=panel[panel.delta_age>0].sort_values(['delta_age','sample_id'],ascending=[False,True])
     if config.max_pairs is not None:panel=panel.head(config.max_pairs)
     if panel.empty:raise ValueError('No aging transitions for SD1.5 counterfactual')
-    print(f'[SD15 paired] {len(panel)} aging transitions × {len(config.strengths)} strengths × 2 conditions; '
+    print(f'[SD15 paired] {len(panel)} aging transitions × {len(config.strengths)} strengths × {len(conditions)} conditions; '
         'compatible saved images are resumed, not regenerated.',flush=True)
     protected={'bundle','image','source_age','target_age','strength','seed','mode','generator','use_inverse_diffusion','use_delta_dependent_strength'}
     if protected&set(config.inference_config):raise ValueError('inference_config overrides paired protocol: '+str(protected&set(config.inference_config)))
@@ -118,7 +120,7 @@ def run_sd15_before_after(config,*,bundle=None,infer_backend=None):
     # Lazy: a fully resumed run does not load any diffusion weights.
     live=bundle
     try:
-        for condition in ['vanilla','finetuned']:
+        for condition in conditions:
             for strength in config.strengths:
                 name=('SD15_vanilla' if condition=='vanilla' else 'ours')+f'@{float(strength):g}'
                 roots[name]=str(output/'generated'/name)
