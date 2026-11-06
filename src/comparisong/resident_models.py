@@ -14,9 +14,10 @@ _RESULT_PREFIX = "__AGING_RESIDENT_RESULT__"
 class ModelSession:
     """Keep only the current baseline resident until its phase finishes."""
 
-    def __init__(self, bundle, name):
+    def __init__(self, bundle, name, *, generation_only=False):
         self.bundle = bundle or {}
         self.name = name
+        self.generation_only = generation_only
         self.worker = None
         self.placements = {}
         self.token = None

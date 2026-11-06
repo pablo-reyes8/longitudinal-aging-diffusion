@@ -150,3 +150,27 @@ def test_fingerprint_cache_survives_restart_and_invalidates_changed_file(tmp_pat
     assert cache.get(source,compute)=='5' and len(calls)==1
     source.write_bytes(b'changed content')
     assert cache.get(source,compute)=='15' and len(calls)==2
+
+
+def test_sam_batches_only_pending_preserving_legacy_singleton_signatures(tmp_path,monkeypatch,capsys):
+    import src.comparisong.generate_images as generator
+    import torch
+    config=configuration(tmp_path,['SAM']);legacy=[]
+    def single(bundle,**kw):
+        legacy.append(kw['target_ages']);print('AGING SWEEP COMPLETE')
+        return {'SAM':{kw['target_ages'][0]:Image.new('RGB',(8,8),'red')}}
+    monkeypatch.setattr(generator,'age_image',single)
+    generate_paper_predictions(config,comparison_bundle={'SAM':{}})
+    old=config.generated_roots['SAM']/'id_new'/'p0.png';previous=old.read_bytes()
+    panel=pd.read_csv(config.test_manifest_path)
+    added={**panel.iloc[0].to_dict(),'sample_id':'p2','target_age':70}
+    pd.concat([panel,pd.DataFrame([added])],ignore_index=True).to_csv(config.test_manifest_path,index=False)
+    batches=[]
+    class Model(torch.nn.Module):
+        def forward(self,x,**kw):batches.append(len(x));return x[:,:3]
+    entry=dict(model=Model(),align_face=lambda **kw:Image.new('RGB',(8,8)),predictor=None,
+        AgeTransformer=lambda **kw:lambda x:x,tensor2im=lambda x:Image.new('RGB',(8,8),'blue'))
+    result=generate_paper_predictions(config,comparison_bundle={'SAM':entry},device='cpu')
+    assert batches==[1] and len(legacy)==2 and len(result['manifest'])==3, result['manifest'].to_dict('records')
+    assert old.read_bytes()==previous
+    assert 'AGING SWEEP COMPLETE' not in capsys.readouterr().out

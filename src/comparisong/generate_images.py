@@ -225,6 +225,10 @@ def _save_standard_result(
     Save model output with a common naming convention.
     """
 
+    session = ACTIVE_MODEL_SESSION.get()
+    if session is not None and getattr(session, "generation_only", False):
+        return None
+
     model_dir = os.path.join(
         output_dir,
         model_name,
@@ -264,6 +268,10 @@ def _save_model_sweep(
     ------
     Source | Age 8 | Age 15 | Age 27 | Age 45 | ...
     """
+
+    session = ACTIVE_MODEL_SESSION.get()
+    if session is not None and getattr(session, "generation_only", False):
+        return None
 
     available_ages = [
         age

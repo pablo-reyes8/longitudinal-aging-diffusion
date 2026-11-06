@@ -1,5 +1,7 @@
 """Generate predictions on an existing paper manifest, without legacy metrics."""
 from pathlib import Path
+from contextlib import redirect_stdout,redirect_stderr
+import os
 import json
 import pandas as pd
 from PIL import Image
@@ -14,7 +16,7 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
         model_loader_config=None, gender_by_id=None, inference_config=None,
         picking_options=None, picking_bundle=None, device='cuda',
         local_files_only=False, retry_failed=False, gender_csv_path=None,
-        fading_group_targets=True):
+        fading_group_targets=True, batch_size=32, progress_every=100):
     """Generate exactly config's panel and roots; save progress after every pair.
 
     No evaluation, test sampling, or module-1 writes. Missing gender is checked
@@ -25,6 +27,8 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
     failed group falls back to individual requests without dropping transitions.
     """
     print('[generate paper] Reading manifest and validating configuration...',flush=True)
+    for key,value in [('batch_size',batch_size),('progress_every',progress_every)]:
+        if isinstance(value,bool) or not isinstance(value,int) or value<1:raise ValueError(f'{key} must be a positive integer')
     from .generate_images import age_image
     from .load_models import load_aging_models
     from .evaluation_backends_v2 import file_hash
@@ -90,7 +94,9 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
         test_manifest_path=str(config.test_manifest_path),generated_roots={n:str(r) for n,r in roots.items()},
         gender_csv_path=str(gender_csv_path) if gender_csv_path is not None else None,
         gender_csv_sha256=file_hash(gender_csv_path) if gender_csv_path is not None else None,
-        fading_group_targets=fading_group_targets,aging_only=aging_only),indent=2))
+        fading_group_targets=fading_group_targets,aging_only=aging_only,
+        batch_size=batch_size,progress_every=progress_every,
+        cusp_decoder_noise='checkpoint_constant' if 'CUSP' in names else None),indent=2))
     options=dict(image_size=400,num_inference_steps=34,seed=config.seed,
         text_reference_mode='source_age',age_guidance_scale=3.,text_guidance_scale=7.,image_guidance_scale=1.5)
     options.update(inference_config or {})
@@ -104,6 +110,11 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
     def persist():
         pd.DataFrame(rows).to_csv(out/'prediction_manifest.csv',index=False)
         pd.DataFrame([r for r in rows if r['inference_status']=='failed']).to_csv(out/'inference_failures.csv',index=False)
+    def external_call(*args,**kwargs):
+        # This generation-only route needs PNGs, not per-pair plots/banners.
+        # Tensor adapters below bypass age_image completely for SAM/FRAN.
+        with open(os.devnull,'w') as quiet,redirect_stdout(quiet),redirect_stderr(quiet):
+            return age_image(*args,**kwargs)
     try:
         for name in external+direct:
             if name in direct and checkpoint_hash is None:
@@ -123,7 +134,7 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
                             digest=resolver.load(path)[1];resolver._cache.clear();return digest
                         source_digests[source]=fingerprint_cache.get(source,compute_source)
                     digest=source_digests[source]
-                    signature=stable_hash(dict(protocol='paper-generation-v1',model=name,source=digest,
+                    signature=stable_hash(dict(protocol='cusp-native-batch-v1' if name=='CUSP' else 'paper-generation-v1',model=name,source=digest,
                         source_age=sample['source_age'],target_age=sample['target_age'],seed=config.seed,
                         gender=genders.get(sample['identity_id']) if name in {'FADING','Cradle2Cane'} else None,
                         inference=options if name in direct else None,checkpoint=checkpoint_hash if name in direct else None,
@@ -148,6 +159,9 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
                 if comparison_bundle is None or comparison_bundle.get(name) is None:
                     comparison_bundle={**(comparison_bundle or {}),**load_aging_models(**{**(model_loader_config or {}),'models':[name],'load_metrics':False})}
                 if comparison_bundle.get(name) is None:raise RuntimeError(f'{name} failed to load; inspect setup log')
+                if name=='CUSP' and not comparison_bundle[name].get('prepare_batch_sample'):
+                    from .cusp_batch import load_cusp_batch_entry
+                    comparison_bundle[name]=load_cusp_batch_entry(comparison_bundle[name],config.seed)
             elif own is None:
                 from src.inference import load_face_aging_inference_bundle
                 own=load_face_aging_inference_bundle(checkpoint_path,device='cpu',local_files_only=local_files_only,load_auxiliary_models=False)
@@ -155,7 +169,17 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
                 for key in ['unet','vae','text_encoder','age_delta_conditioner','age_conditioner']:
                     if hasattr(own.get(key),'to'):own[key].to(device)
                 own['_reuse_loaded_checkpoint']=True
+            runner=None
             def jobs():
+                if runner is not None:
+                    start=0
+                    while start<len(pending):
+                        chunk=pending[start:start+runner.batch_size]
+                        samples=[{**item[0],'_source_digest':source_digests[item[0]['source_path']]} for item in chunk]
+                        predictions=runner.infer(samples)
+                        for item,image in zip(chunk,predictions):yield item,image
+                        start+=len(chunk)
+                    return
                 if name!='FADING' or not fading_group_targets:
                     for item in pending:yield item,None
                     return
@@ -172,19 +196,26 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
                     targets=list(dict.fromkeys(item[0]['target_age'] for item in items))
                     results={}
                     try:
-                        result=age_image(comparison_bundle,image=source,source_age=age,target_ages=targets,
+                        result=external_call(comparison_bundle,image=source,source_age=age,target_ages=targets,
                             models=['FADING'],gender=gender,seed=config.seed,show=False,strict=True,metrics=False,
                             output_dir=str(out/'literature'/'FADING'/items[0][0]['sample_id']))
                         results=result.get('FADING',{})
                     except Exception as exc:
                         print(f'[FADING] Group failed; retrying its transitions individually: {exc}',flush=True)
                     for item in items:yield item,results.get(item[0]['target_age'])
-            with ModelSession(comparison_bundle,name):
+            with ModelSession(comparison_bundle,name,generation_only=True):
+                if name in {'SAM','FRAN','CUSP'} and comparison_bundle[name].get('model') is not None:
+                    from .batched_baselines import BaselineBatchRunner
+                    runner=BaselineBatchRunner(name,comparison_bundle[name],device=device,
+                        cache_dir=out/'preprocessing',batch_size=batch_size)
+                print(f'[{name}] {len(panel)-len(pending)}/{len(panel)} already recorded; {len(pending)} pending'
+                    +(f' | batch={runner.batch_size}' if runner else ''),flush=True)
                 for number,((sample,path,marker,signature,row),prepared_image) in enumerate(jobs(),1):
                     try:
+                        if isinstance(prepared_image,Exception):raise prepared_image
                         if isinstance(prepared_image,Image.Image):image=prepared_image
                         elif name in external:
-                            result=age_image(comparison_bundle,image=sample['source_path'],source_age=sample['source_age'],
+                            result=external_call(comparison_bundle,image=sample['source_path'],source_age=sample['source_age'],
                                 target_ages=[sample['target_age']],models=[name],gender=genders.get(sample['identity_id']) or 'male',
                                 seed=config.seed,show=False,strict=True,metrics=False,
                                 output_dir=str(out/'literature'/name/sample['sample_id']))
@@ -202,10 +233,15 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
                         row.update(generated_path=None,inference_status='failed',inference_error=f'{type(exc).__name__}: {exc}')
                         path.unlink(missing_ok=True);marker.parent.mkdir(parents=True,exist_ok=True)
                         marker.write_text(json.dumps(dict(signature=signature,status='failed',error=row['inference_error'])))
-                    rows.append(row);persist()
-                    if number==1 or number%10==0 or number==len(pending):print(f'[{name}] {number}/{len(pending)}: {row["inference_status"]}',flush=True)
+                    rows.append(row)
+                    if number%progress_every==0 or number==len(pending):
+                        persist()
+                        completed=len(panel)-len(pending)+number
+                        failed=sum(r['model_name']==name and r['inference_status']=='failed' for r in rows)
+                        print(f'[{name}] {completed}/{len(panel)} | remaining={len(pending)-number} | failed={failed}',flush=True)
     finally:
         fingerprint_cache.save()
+        persist()
         if active:
             for key in ['unet','vae','text_encoder','age_delta_conditioner','age_conditioner']:
                 if hasattr(own.get(key),'to'):own[key].to('cpu')
