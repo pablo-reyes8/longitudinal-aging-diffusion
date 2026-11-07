@@ -31,8 +31,20 @@ New optional arguments: `batch_size=32`, `progress_every=100`.
   version because the previous CLI stub never produced valid CUSP predictions.
 - FADING retains its upstream multi-target mechanism: one inversion per source,
   then all pending ages for that source. This is source-level reuse, not a
-  tensor batch of independent null-text inversions. HRFAE and the direct ours
-  path retain their current generators. Picking retains its adaptive search.
+  tensor batch of independent null-text inversions.
+- HRFAE batches pending sources by target age inside its resident isolated
+  process. The original test script supplies setup, normalization, histogram
+  correction, clipping and per-image JPEG encoding. Only its image loop is
+  replaced. Source preprocessing is cached. Each JPEG is decoded and saved as
+  the same canonical PNG expected by analysis. Its spectral normalization is
+  frozen with `trainer.eval()`; otherwise outputs change with batch history.
+  This corrected mode uses `hrfae-batched-eval-v1` signatures: compatible HRFAE
+  predictions resume, but old HRFAE CLI predictions are regenerated. SAM/FRAN/
+  FADING signatures remain unchanged. OOM recursively splits batches and clears
+  the trainer's retained `content_code_a` before retries and after each batch.
+  Worker setup errors stop the phase; individual image errors are persisted.
+- The direct ours path retains its current generator. Picking retains its
+  adaptive search.
 
 Tensor adapters reduce the batch size automatically on OOM; preprocessing
 errors affect only the corresponding sample. Failed tensor batches are split

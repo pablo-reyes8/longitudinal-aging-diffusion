@@ -2,6 +2,8 @@
 from pathlib import Path
 from contextlib import redirect_stdout,redirect_stderr
 import os
+import sys
+import tempfile
 import json
 import pandas as pd
 from PIL import Image
@@ -96,6 +98,7 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
         gender_csv_sha256=file_hash(gender_csv_path) if gender_csv_path is not None else None,
         fading_group_targets=fading_group_targets,aging_only=aging_only,
         batch_size=batch_size,progress_every=progress_every,
+        hrfae_mode='batched_eval_histogram_jpeg' if 'HRFAE' in names else None,
         cusp_decoder_noise='checkpoint_constant' if 'CUSP' in names else None),indent=2))
     options=dict(image_size=400,num_inference_steps=34,seed=config.seed,
         text_reference_mode='source_age',age_guidance_scale=3.,text_guidance_scale=7.,image_guidance_scale=1.5)
@@ -134,7 +137,8 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
                             digest=resolver.load(path)[1];resolver._cache.clear();return digest
                         source_digests[source]=fingerprint_cache.get(source,compute_source)
                     digest=source_digests[source]
-                    signature=stable_hash(dict(protocol='cusp-native-batch-v1' if name=='CUSP' else 'paper-generation-v1',model=name,source=digest,
+                    protocol='hrfae-batched-eval-v1' if name=='HRFAE' else 'cusp-native-batch-v1' if name=='CUSP' else 'paper-generation-v1'
+                    signature=stable_hash(dict(protocol=protocol,model=name,source=digest,
                         source_age=sample['source_age'],target_age=sample['target_age'],seed=config.seed,
                         gender=genders.get(sample['identity_id']) if name in {'FADING','Cradle2Cane'} else None,
                         inference=options if name in direct else None,checkpoint=checkpoint_hash if name in direct else None,
@@ -171,6 +175,42 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
                 own['_reuse_loaded_checkpoint']=True
             runner=None
             def jobs():
+                if name=='HRFAE':
+                    from .resident_models import ACTIVE_MODEL_SESSION
+                    session=ACTIVE_MODEL_SESSION.get();entry=comparison_bundle[name]
+                    groups={}
+                    for item in pending:groups.setdefault(int(item[0]['target_age']),[]).append(item)
+                    size=batch_size
+                    with tempfile.TemporaryDirectory(prefix='hrfae_outputs_') as folder:
+                        for age,items in groups.items():
+                            start=0
+                            while start<len(items):
+                                chunk=items[start:start+size]
+                                request=[{**item[0],
+                                    '_source_digest':source_digests[item[0]['source_path']],
+                                    'output_path':str(Path(folder)/(item[0]['sample_id']+'.jpg'))} for item in chunk]
+                                try:
+                                    with open(os.devnull,'w') as quiet,redirect_stdout(quiet),redirect_stderr(quiet):
+                                        response=session.run_hrfae_batch([sys.executable,entry['script'],'--config',str(entry['config'])],
+                                            entry['root'],request,batch_size=size)
+                                    reduced=min(size,response.get('batch_size',size))
+                                    if reduced<size:print(f'[HRFAE] VRAM limit: reducing batch to {reduced}',flush=True)
+                                    size=reduced
+                                    results={r['sample_id']:r for r in response['results']}
+                                except Exception as exc:
+                                    raise RuntimeError('HRFAE batch worker setup/protocol failed; completed predictions are saved. '
+                                        'Inspect the worker error before resuming.') from exc
+                                for item in chunk:
+                                    result=results.get(item[0]['sample_id'],dict(status='failed',error='No HRFAE batch result'))
+                                    if result['status']=='ok':
+                                        try:
+                                            with Image.open(result['output_path']) as image:prepared=image.convert('RGB')
+                                            Path(result['output_path']).unlink(missing_ok=True)
+                                        except Exception as exc:prepared=exc
+                                    else:prepared=RuntimeError(result['error'])
+                                    yield item,prepared
+                                start+=len(chunk)
+                    return
                 if runner is not None:
                     start=0
                     while start<len(pending):
@@ -209,7 +249,7 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
                     runner=BaselineBatchRunner(name,comparison_bundle[name],device=device,
                         cache_dir=out/'preprocessing',batch_size=batch_size)
                 print(f'[{name}] {len(panel)-len(pending)}/{len(panel)} already recorded; {len(pending)} pending'
-                    +(f' | batch={runner.batch_size}' if runner else ''),flush=True)
+                    +(f' | batch={runner.batch_size}' if runner else f' | batch={batch_size} (same target age)' if name=='HRFAE' else ''),flush=True)
                 for number,((sample,path,marker,signature,row),prepared_image) in enumerate(jobs(),1):
                     try:
                         if isinstance(prepared_image,Exception):raise prepared_image

@@ -44,7 +44,7 @@ class ModelSession:
             and Path(cmd[1]).resolve() == Path(entry["script"]).resolve()
         )
 
-    def run_command(self, cmd, cwd, env):
+    def _request(self, request, cwd, env):
         if self.worker is None or self.worker.poll() is not None:
             runner = Path(__file__).with_name("resident_worker.py")
             self.worker = subprocess.Popen(
@@ -53,7 +53,6 @@ class ModelSession:
                 text=True, bufsize=1,
             )
             print(f"[{self.name}] Resident worker started", flush=True)
-        request = {"cmd": list(map(str, cmd)), "cwd": str(cwd) if cwd else None}
         self.worker.stdin.write(json.dumps(request) + "\n")
         self.worker.stdin.flush()
         for line in self.worker.stdout:
@@ -61,9 +60,18 @@ class ModelSession:
                 result = json.loads(line[len(_RESULT_PREFIX):])
                 if not result["ok"]:
                     raise RuntimeError(f"{self.name}: {result['error']}")
-                return subprocess.CompletedProcess(cmd, 0, stdout="")
+                return result
             print(line, end="", flush=True)
         raise RuntimeError(f"{self.name} resident worker exited unexpectedly")
+
+    def run_command(self, cmd, cwd, env):
+        self._request({"cmd":list(map(str,cmd)),"cwd":str(cwd) if cwd else None},cwd,env)
+        return subprocess.CompletedProcess(cmd,0,stdout="")
+
+    def run_hrfae_batch(self,cmd,cwd,samples,*,batch_size=32,env=None):
+        if self.name!='HRFAE':raise ValueError('HRFAE batch requests require its model session')
+        return self._request(dict(mode='hrfae_batch',cmd=list(map(str,cmd)),cwd=str(cwd),
+            samples=samples,batch_size=batch_size),cwd,env)
 
     def close(self):
         if self.worker is not None:

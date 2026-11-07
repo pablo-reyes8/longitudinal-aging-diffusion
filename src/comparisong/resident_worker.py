@@ -5,6 +5,9 @@ argument parsing, preprocessing, inversion, editing and image saving execute
 again for every request. Each request gets a fresh globals dictionary and (for
 FADING) its original fresh scheduler. This file imports no project packages so
 the upstream repositories keep their isolated import namespaces.
+
+The generation-only HRFAE batch mode retains the original script setup and
+preprocess in a separate runtime state and replaces only its image loop.
 """
 
 import ast
@@ -121,8 +124,12 @@ def main():
         if request.get("close"):
             break
         try:
-            runtime.run(request["cmd"], request.get("cwd"))
-            result = {"ok": True}
+            if request.get('mode')=='hrfae_batch':
+                from hrfae_batch_worker import run_batch
+                result={'ok':True,**run_batch(runtime,request)}
+            else:
+                runtime.run(request["cmd"], request.get("cwd"))
+                result = {"ok": True}
         except BaseException as exc:
             traceback.print_exc()
             result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
