@@ -19,11 +19,11 @@ def test_exact_manifest_failure_persistence_and_resume(tmp_path,monkeypatch):
     import src.comparisong.load_models as loader
     from src.comparisong.resident_models import ACTIVE_MODEL_SESSION
     config=configuration(tmp_path,['SAM']);calls=[]
-    from src.quantitative_metrics.image_io import ImageResolver
-    load=ImageResolver.load;reads=[]
-    def counted_load(self,path):
-        reads.append(str(path));return load(self,path)
-    monkeypatch.setattr(ImageResolver,'load',counted_load)
+    import src.comparisong.evaluation_backends_v2 as backends
+    load=backends.file_hash;reads=[]
+    def counted_load(path):
+        reads.append(str(path));return load(path)
+    monkeypatch.setattr(backends,'file_hash',counted_load)
     def generate(bundle,**kw):
         assert ACTIVE_MODEL_SESSION.get().name=='SAM'
         assert not kw['metrics']
@@ -174,3 +174,59 @@ def test_sam_batches_only_pending_preserving_legacy_singleton_signatures(tmp_pat
     assert batches==[1] and len(legacy)==2 and len(result['manifest'])==3, result['manifest'].to_dict('records')
     assert old.read_bytes()==previous
     assert 'AGING SWEEP COMPLETE' not in capsys.readouterr().out
+
+
+def test_completed_phase_resumes_from_one_progress_file_without_scanning(tmp_path,monkeypatch):
+    import src.comparisong.generate_images as generator
+    import src.comparisong.load_models as loader
+    import src.comparisong.prediction_resume as resume
+    from src.comparisong.generation_cache import FingerprintCache
+    config=configuration(tmp_path,['SAM'])
+    monkeypatch.setattr(generator,'age_image',lambda bundle,**kw:{'SAM':{kw['target_ages'][0]:Image.new('RGB',(8,8))}})
+    generate_paper_predictions(config,comparison_bundle={'SAM':{}})
+    def forbidden(*args,**kwargs):raise AssertionError('completed phase must not scan/load/reopen')
+    monkeypatch.setattr(Image,'open',forbidden)
+    monkeypatch.setattr(resume.os,'scandir',forbidden)
+    monkeypatch.setattr(FingerprintCache,'get',forbidden)
+    monkeypatch.setattr(loader,'load_aging_models',forbidden)
+    result=generate_paper_predictions(config)
+    assert len(result['manifest'])==2 and result['manifest'].inference_status.eq('ok').all()
+
+
+def test_legacy_fast_import_never_opens_completed_images_or_markers(tmp_path,monkeypatch):
+    import src.comparisong.generate_images as generator
+    from src.comparisong.generation_cache import FingerprintCache
+    from pathlib import Path
+    config=configuration(tmp_path,['SAM'])
+    monkeypatch.setattr(generator,'age_image',lambda bundle,**kw:{'SAM':{kw['target_ages'][0]:Image.new('RGB',(8,8))}})
+    generate_paper_predictions(config,comparison_bundle={'SAM':{}})
+    (config.output_dir/'generation'/'resume_state.json').unlink()
+    original=Path.read_text
+    def read(self,*args,**kwargs):
+        assert self.parent.name!='id_new','legacy completed marker must not be opened'
+        return original(self,*args,**kwargs)
+    monkeypatch.setattr(Path,'read_text',read)
+    def forbidden(*args,**kwargs):raise AssertionError('legacy import must not reopen PNGs or fingerprint sources')
+    monkeypatch.setattr(Image,'open',forbidden)
+    monkeypatch.setattr(FingerprintCache,'get',forbidden)
+    assert len(generate_paper_predictions(config)['manifest'])==2
+
+
+def test_fast_resume_does_not_adopt_files_rejected_by_interrupted_strict_scan(tmp_path,monkeypatch):
+    import src.comparisong.generate_images as generator
+    import src.comparisong.load_models as loader
+    config=configuration(tmp_path,['SAM']);calls=[]
+    def generate(bundle,**kw):
+        age=kw['target_ages'][0];calls.append(age)
+        return {'SAM':{age:Image.new('RGB',(8,8))}}
+    monkeypatch.setattr(generator,'age_image',generate)
+    generate_paper_predictions(config,comparison_bundle={'SAM':{}})
+    panel=pd.read_csv(config.test_manifest_path);panel.loc[0,'target_age']=70
+    panel.to_csv(config.test_manifest_path,index=False)
+    def fail(**kw):raise RuntimeError('setup interrupted')
+    monkeypatch.setattr(loader,'load_aging_models',fail)
+    with pytest.raises(RuntimeError,match='setup interrupted'):
+        generate_paper_predictions(config,resume_validation='strict')
+    result=generate_paper_predictions(config,comparison_bundle={'SAM':{}})
+    assert calls==[40,60,70]
+    assert result['manifest'].inference_status.eq('ok').all()

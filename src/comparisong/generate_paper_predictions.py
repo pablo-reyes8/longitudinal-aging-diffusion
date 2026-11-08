@@ -8,7 +8,6 @@ import json
 import pandas as pd
 from PIL import Image
 from src.aging_bias.features import stable_hash
-from src.quantitative_metrics.image_io import ImageResolver
 from .evaluate_paper_v2 import load_test_panel
 from .identity_metadata import TEST_ID_GENDERS,load_gender_csv
 from .resident_models import ModelSession
@@ -18,19 +17,24 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
         model_loader_config=None, gender_by_id=None, inference_config=None,
         picking_options=None, picking_bundle=None, device='cuda',
         local_files_only=False, retry_failed=False, gender_csv_path=None,
-        fading_group_targets=True, batch_size=32, progress_every=100):
+        fading_group_targets=True, batch_size=32, progress_every=100,
+        resume_validation='fast', resume_workers=16):
     """Generate exactly config's panel and roots; save progress after every pair.
 
     No evaluation, test sampling, or module-1 writes. Missing gender is checked
     before generation for gender-dependent models; no inferred default labels.
-    Successful files require a compatible signature and readable PNG to resume.
+    Fast resume trusts saved progress for unchanged inputs/parameters. Legacy
+    runs import PNG+JSON filenames once, without opening every image/marker.
+    resume_validation='strict' validates signatures and changed artifacts.
     Gender precedence: explicit dict > CSV > manifest > legacy labels. FADING
     groups pending targets by source to reuse its original CLI inversion. A
     failed group falls back to individual requests without dropping transitions.
     """
     print('[generate paper] Reading manifest and validating configuration...',flush=True)
-    for key,value in [('batch_size',batch_size),('progress_every',progress_every)]:
+    for key,value in [('batch_size',batch_size),('progress_every',progress_every),('resume_workers',resume_workers)]:
         if isinstance(value,bool) or not isinstance(value,int) or value<1:raise ValueError(f'{key} must be a positive integer')
+    if resume_validation not in {'fast','strict'}:raise ValueError('resume_validation must be fast or strict')
+    fast=config.resume and resume_validation=='fast'
     from .generate_images import age_image
     from .load_models import load_aging_models
     from .evaluation_backends_v2 import file_hash
@@ -64,7 +68,12 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
         missing=[i for i in panel.identity_id.unique() if not genders.get(i)]
         if missing:raise ValueError(f'Missing gender labels for {len(missing)} IDs; pass gender_csv_path or gender_by_id. First IDs: {missing[:20]}')
     out=Path(config.output_dir)/'generation';out.mkdir(parents=True,exist_ok=True)
-    if aging_only and len(excluded):
+    try:previous_config=json.loads((out/'generation_config.json').read_text())
+    except (ValueError,OSError):previous_config={}
+    already_clean=(previous_config.get('aging_only') is True
+        and previous_config.get('generated_roots')=={n:str(r) for n,r in roots.items()}
+        and previous_config.get('test_manifest_path')==str(config.test_manifest_path))
+    if aging_only and len(excluded) and not (fast and already_clean):
         import shutil
         removed=0
         for sample in excluded.to_dict('records'):
@@ -88,6 +97,8 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
                         frame.to_csv(path,index=False)
                 except pd.errors.EmptyDataError:pass
         print(f'[generate paper] Aging only: excluded {len(excluded)} rejuvenations; removed {removed} generated artifacts. Aging outputs retained.',flush=True)
+    elif aging_only and len(excluded):
+        print('[generate paper] Aging only: previous cleanup reused; no rejuvenation scan.',flush=True)
     panel.to_csv(out/'transitions.csv',index=False)
     from .generation_cache import FingerprintCache
     fingerprint_cache=FingerprintCache(out/'fingerprints.json')
@@ -98,6 +109,7 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
         gender_csv_sha256=file_hash(gender_csv_path) if gender_csv_path is not None else None,
         fading_group_targets=fading_group_targets,aging_only=aging_only,
         batch_size=batch_size,progress_every=progress_every,
+        resume_validation=resume_validation,
         hrfae_mode='batched_eval_histogram_jpeg' if 'HRFAE' in names else None,
         cusp_decoder_noise='checkpoint_constant' if 'CUSP' in names else None),indent=2))
     options=dict(image_size=400,num_inference_steps=34,seed=config.seed,
@@ -105,14 +117,20 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
     options.update(inference_config or {})
     if {'bundle','image','source_age','target_age','strength','device','compute_diagnostics','return_dict','output_type'}&set(options):
         raise ValueError('inference_config contains reserved generation arguments')
-    rows=[];resolver=ImageResolver();own=None;active=False
-    # Files are immutable inputs during a run. Keep only their small digests,
-    # not decoded images, across transitions/models. Re-read on the next run.
+    rows=[];own=None;active=False
+    from .prediction_resume import ProgressResume,ResumeIndex
+    progress=ProgressResume(out/'resume_state.json');contexts={};indexes={};blocked={}
+    expected_ids=set(panel.sample_id)
+    # Fast resume trusts frozen inputs; strict mode checks size/mtime before
+    # reusing a fingerprint. Never decode source images merely to hash bytes.
     source_digests={}
     checkpoint_hash=None
     def persist():
-        pd.DataFrame(rows).to_csv(out/'prediction_manifest.csv',index=False)
-        pd.DataFrame([r for r in rows if r['inference_status']=='failed']).to_csv(out/'inference_failures.csv',index=False)
+        if rows:
+            pd.DataFrame(rows).to_csv(out/'prediction_manifest.csv',index=False)
+            pd.DataFrame([r for r in rows if r['inference_status']=='failed']).to_csv(out/'inference_failures.csv',index=False)
+        progress.save(rows,contexts,expected_ids,blocked)
+        for index in indexes.values():index.save()
     def external_call(*args,**kwargs):
         # This generation-only route needs PNGs, not per-pair plots/banners.
         # Tensor adapters below bypass age_image completely for SAM/FRAN.
@@ -120,22 +138,61 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
             return age_image(*args,**kwargs)
     try:
         for name in external+direct:
-            if name in direct and checkpoint_hash is None:
-                print('[generate paper] Checking adapter fingerprint for our direct model...',flush=True)
-                checkpoint_hash=fingerprint_cache.get(checkpoint_path,file_hash)
+            loader_keys={'SAM':[],'FRAN':[],'FADING':['fading_specialized_path'],
+                'HRFAE':['hrfae_checkpoint_path'],'CUSP':['cusp_variant','cusp_checkpoint_path'],
+                'Cradle2Cane':[]}.get(name,[])
+            loader_context={'root':str((model_loader_config or {}).get('root','/content/aging_benchmarks')),
+                **{key:(model_loader_config or {}).get(key) for key in loader_keys}}
+            context=stable_hash(dict(model=name,root=str(roots[name]),seed=config.seed,
+                loader=loader_context if name in external else None,inference=options if name in direct else None,
+                checkpoint_path=str(checkpoint_path) if name in direct else None,
+                genders={identity:genders.get(identity) for identity in panel.identity_id.unique()} if name in {'FADING','Cradle2Cane'} else None,
+                protocol='hrfae-batched-eval-v1' if name=='HRFAE' else 'cusp-native-batch-v1' if name=='CUSP' else 'paper-generation-v1'))
+            saved=progress.load(name,context) if fast else None
+            contexts[name]=context
+            blocked[name]=set((saved or {}).get('pending',[]))
+            saved_rows={r['sample_id']:r for r in (saved or {}).get('rows',[])
+                if r['sample_id'] in expected_ids and not (retry_failed and r['inference_status']=='failed')}
+            if fast and saved_rows:
+                if not roots[name].is_dir():
+                    raise FileNotFoundError(f'{name}: saved progress exists but its prediction folder is missing: {roots[name]}. Restore it before resuming.')
+                for sample in panel.to_dict('records'):
+                    previous=saved_rows.get(sample['sample_id'])
+                    if previous and any(previous[k]!=sample[k] for k in ['identity_id','source_age','target_age','source_path','target_path']):
+                        raise ValueError(f'Transition metadata changed for {sample["sample_id"]}; use resume_validation="strict".')
+            if fast and len(saved_rows)==len(panel) and roots[name].is_dir():
+                rows.extend(saved_rows.values())
+                print(f'[{name}] complete: {len(panel)}/{len(panel)} recorded — skipped without scanning files.',flush=True)
+                continue
+            unknown=panel[~panel.sample_id.isin(saved_rows)] if fast else panel
+            print(f'[resume] {name}: {len(saved_rows)} recorded; listing {unknown.identity_id.nunique()} ID folders '
+                f'({resume_workers} I/O workers). No model loading.',flush=True)
+            index=ResumeIndex(out/'resume'/f'{name}.json',roots[name],unknown.identity_id,workers=resume_workers)
+            indexes[name]=index
             pending=[]
             print(f'[generate paper] {name}: checking inputs and saved outputs...',flush=True)
             for number,sample in enumerate(panel.to_dict('records'),1):
                 if number==1 or number%100==0 or number==len(panel):
-                    print(f'[resume scan] {name}: {number}/{len(panel)} | {len(source_digests)} source fingerprints cached',flush=True)
+                    print(f'[resume {"filenames" if fast else "scan"}] {name}: {number}/{len(panel)}',flush=True)
                 path=roots[name]/sample['identity_id']/(sample['sample_id']+'.png');marker=path.with_suffix('.json')
                 row={**sample,'model_name':name,'generated_path':str(path),'inference_status':'ok','inference_error':None}
                 try:
+                    if fast:
+                        cached_row=saved_rows.get(sample['sample_id'])
+                        if cached_row is not None:
+                            rows.append(cached_row);continue
+                        cached,valid,_=index.fast_inspect(path) if sample['sample_id'] not in blocked[name] else (None,False,None)
+                        if valid:
+                            if cached.get('status')=='failed':
+                                if retry_failed:valid=False
+                                else:row.update(generated_path=None,inference_status='failed',inference_error=cached.get('error','Cached failure'))
+                            if valid:rows.append(row);continue
+                    if name in direct and checkpoint_hash is None:
+                        print('[generate paper] Checking adapter fingerprint for our direct model...',flush=True)
+                        checkpoint_hash=(fingerprint_cache.peek(checkpoint_path) if fast else None) or fingerprint_cache.get(checkpoint_path,file_hash)
                     source=sample['source_path']
                     if source not in source_digests:
-                        def compute_source(path):
-                            digest=resolver.load(path)[1];resolver._cache.clear();return digest
-                        source_digests[source]=fingerprint_cache.get(source,compute_source)
+                        source_digests[source]=(fingerprint_cache.peek(source) if fast else None) or fingerprint_cache.get(source,file_hash)
                     digest=source_digests[source]
                     protocol='hrfae-batched-eval-v1' if name=='HRFAE' else 'cusp-native-batch-v1' if name=='CUSP' else 'paper-generation-v1'
                     signature=stable_hash(dict(protocol=protocol,model=name,source=digest,
@@ -143,21 +200,19 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
                         gender=genders.get(sample['identity_id']) if name in {'FADING','Cradle2Cane'} else None,
                         inference=options if name in direct else None,checkpoint=checkpoint_hash if name in direct else None,
                         loader=model_loader_config if name in external else None))
-                    try:cached=json.loads(marker.read_text()) if config.resume and marker.exists() else {}
-                    except (ValueError,OSError):cached={}
-                    if cached.get('signature')==signature:
+                    cached,valid,reason=index.inspect(path,signature) if config.resume and (not fast or sample['sample_id'] in blocked[name]) else (None,False,None)
+                    if valid:
                         if cached.get('status')=='failed' and not retry_failed:
                             rows.append({**row,'generated_path':None,'inference_status':'failed','inference_error':cached.get('error')});continue
-                        if cached.get('status')=='ok' and path.is_file():
-                            try:
-                                with Image.open(path) as image:image.verify()
-                                rows.append(row);continue
-                            except OSError:pass
+                        if cached.get('status','ok')=='ok':rows.append(row);continue
                     pending.append((sample,path,marker,signature,row))
+                    if not config.resume or reason in {'signature_mismatch','invalid_marker','corrupt_png'}:
+                        blocked[name].add(sample['sample_id'])
                 except Exception as exc:
                     rows.append({**row,'generated_path':None,'inference_status':'failed','inference_error':str(exc)});persist()
             print(f'[generate paper] {name}: {len(pending)} pending / {len(panel)}',flush=True)
             fingerprint_cache.save()
+            persist()
             if not pending:persist();continue
             if name in external:
                 if comparison_bundle is None or comparison_bundle.get(name) is None:
@@ -268,11 +323,14 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
                             image=result['image']
                         if not isinstance(image,Image.Image):raise RuntimeError('Model returned no image')
                         path.parent.mkdir(parents=True,exist_ok=True);temp=path.with_suffix('.tmp.png');image.save(temp);temp.replace(path)
-                        marker.write_text(json.dumps(dict(signature=signature,status='ok')))
+                        completed_marker=dict(signature=signature,status='ok')
+                        marker.write_text(json.dumps(completed_marker))
+                        if not fast:index.record(path,completed_marker)
                     except Exception as exc:
                         row.update(generated_path=None,inference_status='failed',inference_error=f'{type(exc).__name__}: {exc}')
                         path.unlink(missing_ok=True);marker.parent.mkdir(parents=True,exist_ok=True)
                         marker.write_text(json.dumps(dict(signature=signature,status='failed',error=row['inference_error'])))
+                        if not fast:index.record(path,dict(signature=signature,status='failed',error=row['inference_error']))
                     rows.append(row)
                     if number%progress_every==0 or number==len(pending):
                         persist()

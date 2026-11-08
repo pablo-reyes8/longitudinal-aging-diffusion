@@ -6,6 +6,32 @@ transitions by default. `run_paper_analysis` consumes the same outputs.
 
 New optional arguments: `batch_size=32`, `progress_every=100`.
 
+## Resume without a full Drive scan
+
+The default `resume_validation='fast'` is for an unchanged dataset and run.
+`generation/resume_state.json` stores each model's parameters, recorded rows,
+and completion status. Completed phases skip immediately without listing
+identities, hashing sources, opening JSON sidecars, or reopening PNGs. Partial
+phases retain their recorded rows and process only unknown transitions.
+
+Existing runs without this file are imported once using PNG+JSON filename
+pairs, with concurrent per-ID directory listings (`resume_workers=16`). No PNG
+or successful sidecar content is opened in this import. Failed sidecars without
+PNGs are read to retain the existing `retry_failed` behavior. This migration
+trusts that the legacy outputs belong to the unchanged run, as requested.
+The completed model is then checkpointed before loading any subsequent model.
+Do not delete resume_state.json when moving/resuming results.
+
+Fast resume intentionally trusts the immutable inputs and saved progress; it
+does not detect an external edit/corruption of an already recorded file. It
+does check the run parameters and transition metadata in memory. A missing
+prediction root blocks a recorded phase rather than declaring it complete.
+If data or generation parameters were changed, use
+`resume_validation='strict'`: it validates source fingerprints and prediction
+signatures, and verifies newly seen/changed PNGs. A persistent per-model index
+avoids reopening unchanged PNG/JSON content on later strict scans. Neither
+mode changes the PNG paths or existing prediction signatures.
+
 - SAM uses tensor batches, its original age transform, FP32 inputs, and
   `randomize_noise=False, resize=False`. Its historical RGB/JPEG quality-95
   conversion before alignment is preserved. Aligned 256-pixel input tensors
@@ -61,7 +87,10 @@ including the already recorded count, remaining count, and failed count.
 
 Each result is committed as a PNG plus JSON marker. Progress CSVs are flushed
 every 100 transitions, at phase end, and during orderly interruption. Abrupt
-process death can leave the CSV behind the markers; resume reconstructs it.
+process death can leave the CSV/progress file behind the markers; resume imports
+the extra PNG+JSON pairs. Later model checkpoints are retained even when an
+earlier phase is resumed or interrupted. Empty initialization attempts do not
+overwrite the previous prediction CSV.
 Unfinished batches may be computed again if their images were never saved.
 
 Verification uses only toy CPU networks, tiny images, injected OOM/errors,
