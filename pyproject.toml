@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "longitudinal-face-aging"
-version = "0.1.0"
+version = "0.2.0"
 description = "Supervised longitudinal face-aging with Stable Diffusion 1.5 and LoRA."
 readme = "README.md"
 requires-python = ">=3.10"
