@@ -360,6 +360,7 @@ def diagnose_checkpoint_smart_age_sweep(
     source_mouth_state: str = "auto",
     source_expression_state: str = "auto",
     save_prompt_comparison: bool = True,
+    verbose: bool = True,
 ) -> pd.DataFrame:
     """Search candidates with asymmetric aging and calibrated rejuvenation bands.
 
@@ -587,7 +588,7 @@ def diagnose_checkpoint_smart_age_sweep(
         selected["row"]["selected_best"] = True
         selected_candidates.append(selected)
         all_candidates.append(candidates)
-        print(
+        if verbose: print(
             " Smart sweep | "
             f"target={target_age:3d} | trials={len(candidates)} | "
             f"strength={selected['row']['strength']:.3f} | "
@@ -710,7 +711,7 @@ def diagnose_checkpoint_smart_age_sweep(
             assisted_candidates.append(assisted)
             assisted_rows.append(row)
             prompt_records.append({"target_age": target_age, **assistance})
-            print(
+            if verbose: print(
                 " Prompt comparison | "
                 f"target={target_age:3d} | strength={row['strength']:.3f} | "
                 f"base corr={base_row['selection_pred_age']:.2f} "
@@ -721,8 +722,8 @@ def diagnose_checkpoint_smart_age_sweep(
         for warning in dict.fromkeys(
             warning for record in prompt_records for warning in record["warnings"]
         ):
-            print(f"  Note: {warning}")
-        if prompt_records:
+            if verbose: print(f"  Note: {warning}")
+        if verbose and prompt_records:
             print("  Positive support: " + ", ".join(prompt_records[0]["positive_terms"]))
             print("  Negative prompt: " + prompt_records[0]["negative_prompt"])
             print(

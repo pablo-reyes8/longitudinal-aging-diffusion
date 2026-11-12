@@ -130,7 +130,7 @@ def initial_strength_for_transition(source_age,target_age,config):
     return min(config.max_strength,max(config.min_strength,start))
 
 
-def run_picking_variants(config,*,bundle,sweep_backend=None):
+def run_picking_variants(config,*,bundle,sweep_backend=None,progress_every=100):
     """One canonical smart search per pair, plus its assisted prompt variant.
 
     Matches diagnose_checkpoint_smart_age_sweep exactly: the assisted image
@@ -164,8 +164,13 @@ def run_picking_variants(config,*,bundle,sweep_backend=None):
     params.pop('delta_age_strength_map')  # Internal benchmark policy, not a sweep argument.
     resolver=ImageResolver();rows=[];failures=[];active=False
     previous_reuse=bundle.get('_reuse_loaded_checkpoint',False)
-    print('[ours picking variants] Mouth/teeth protection always enabled; preserving source mouth opening, no classifier required.',flush=True)
-    if config.overwrite:print('[ours picking variants] overwrite=True: replacing existing outputs; backups in stale/.',flush=True)
+    if isinstance(progress_every,bool) or not isinstance(progress_every,int) or progress_every<1:
+        raise ValueError('progress_every must be a positive integer')
+    total=len(panel)
+    print(f'[ours picking variants] 0/{total}',flush=True)
+    def report_progress(number):
+        if number%progress_every==0 or number==total:
+            print(f'[ours picking variants] {number}/{total} | remaining={total-number} | failed={len(failures)}',flush=True)
     def persist():
         pd.DataFrame(rows).to_csv(output/'prediction_manifest.csv',index=False)
         pd.DataFrame(failures,columns=[*panel.columns,'model_name','generated_path','inference_status','inference_error']).to_csv(output/'inference_failures.csv',index=False)
@@ -176,7 +181,7 @@ def run_picking_variants(config,*,bundle,sweep_backend=None):
             shutil.move(str(path),str(stale))
             if marker.exists():shutil.copy2(marker,stale.with_suffix('.json'))
     try:
-        for sample in panel.to_dict('records'):
+        for number,sample in enumerate(panel.to_dict('records'),1):
             start=initial_strength_for_transition(sample['source_age'],sample['target_age'],config)
             sample={**sample,'initial_strength':start,
                 'initial_strength_policy':'age_gap' if config.target_age_strength_map is None else 'explicit_target_map'}
@@ -190,7 +195,7 @@ def run_picking_variants(config,*,bundle,sweep_backend=None):
                     quarantine(path,path.with_suffix('.json'))
                     row=dict(sample,model_name=name,generated_path=None,inference_status='failed',inference_error=str(exc))
                     rows.append(row);failures.append(row)
-                persist();continue
+                persist();report_progress(number);continue
             for name in names:
                 path=Path(roots[name])/sample['identity_id']/(sample['sample_id']+'.png');marker=path.with_suffix('.json')
                 row=dict(sample,model_name=name,generated_path=str(path),inference_status='ok')
@@ -209,7 +214,8 @@ def run_picking_variants(config,*,bundle,sweep_backend=None):
                     row.update(generated_path=None,inference_status='failed',inference_error=cached['error'])
                     rows.append(row);failures.append(row);continue
                 pending.append((name,path,marker,row))
-            if not pending:continue
+            if not pending:
+                report_progress(number);continue
             error=None;frame=None
             try:
                 if not active:
@@ -222,10 +228,9 @@ def run_picking_variants(config,*,bundle,sweep_backend=None):
                     from src.inference import diagnose_checkpoint_smart_age_sweep
                     sweep_backend=diagnose_checkpoint_smart_age_sweep
                 pair_params={**params,'target_age_strength_map':{int(sample['target_age']):start}}
-                print(f'[ours picking variants] {sample["sample_id"]} | initial strength={start:.3f}',flush=True)
                 frame=sweep_backend(checkpoint_path=config.checkpoint_path,bundle=bundle,
                     source_image=sample['source_path'],source_age=int(sample['source_age']),target_ages=[int(sample['target_age'])],
-                    output_dir=output/'picking'/sample['sample_id'],generate_assisted_prompt_variant=True,**pair_params)
+                    output_dir=output/'picking'/sample['sample_id'],generate_assisted_prompt_variant=True,verbose=False,**pair_params)
             except Exception as exc:error=f'{type(exc).__name__}: {exc}'
             for name,path,marker,row in pending:
                 try:
@@ -243,6 +248,7 @@ def run_picking_variants(config,*,bundle,sweep_backend=None):
                     marker.write_text(json.dumps(dict(signature=key,status='failed',error=row['inference_error'])))
                 rows.append(row)
             persist()
+            report_progress(number)
     finally:
         bundle['_reuse_loaded_checkpoint']=previous_reuse
         if active:
