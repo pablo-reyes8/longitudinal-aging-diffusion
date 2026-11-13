@@ -5,7 +5,7 @@ import pytest
 from PIL import Image
 
 
-def test_smart_variants_keep_prompt_even_when_worse_and_resume(tmp_path):
+def test_smart_variants_keep_prompt_even_when_worse_and_resume(tmp_path,monkeypatch,capsys):
     from src.comparisong.picking_variants import PickingVariantsConfig,run_picking_variants
     source=tmp_path/'source.png';Image.new('RGB',(16,16)).save(source)
     panel=tmp_path/'panel.csv'
@@ -37,7 +37,13 @@ def test_smart_variants_keep_prompt_even_when_worse_and_resume(tmp_path):
     rows=result['manifest'].set_index('model_name')
     assert Image.open(rows.loc['ours_picking_no_prompt','generated_path']).getpixel((0,0))==(255,0,0)
     assert Image.open(rows.loc['ours_picking_prompt','generated_path']).getpixel((0,0))==(0,0,255)
+    capsys.readouterr()
+    from src.quantitative_metrics.image_io import ImageResolver
+    monkeypatch.setattr(ImageResolver,'load',lambda *a,**k:pytest.fail('fast resume decoded a source'))
     run_picking_variants(cfg,bundle=bundle,sweep_backend=lambda **kw:(_ for _ in ()).throw(AssertionError('cached inference repeated')))
+    resumed_output=capsys.readouterr().out
+    assert '[ours picking variants] 1/1' in resumed_output
+    assert '[ours picking variants] 0/1' not in resumed_output
     assert module.placements==['cpu','cpu']  # Activate once, offload once, cached run inactive.
 
 
@@ -71,6 +77,44 @@ def test_default_picking_start_depends_on_gap_not_absolute_target_and_resumes(tm
     assert refreshed['failures'].empty
     assert starts[4:]==pytest.approx([.2]*4)
     assert len(list((tmp_path/'out/stale').rglob('*.png')))==8
+
+
+@pytest.mark.parametrize('legacy',[False,True])
+def test_picking_resume_counts_interrupted_prefix_without_decoding_it(tmp_path,monkeypatch,capsys,legacy):
+    from src.comparisong.picking_variants import PickingVariantsConfig,run_picking_variants
+    from src.quantitative_metrics.image_io import ImageResolver
+    source=tmp_path/'source.png';Image.new('RGB',(16,16)).save(source)
+    panel=tmp_path/'panel.csv'
+    pd.DataFrame([dict(sample_id=f'p{i}',identity_id='id_1',source_path=str(source),
+        target_path=str(source),source_age=20,target_age=50+i) for i in range(2)]).to_csv(panel,index=False)
+    checkpoint=tmp_path/'adapter.pt';checkpoint.write_bytes(b'adapter')
+    cfg=PickingVariantsConfig(checkpoint,panel,tmp_path/'out',device='cpu',overwrite=False)
+    bundle=dict(unet=object(),identity_encoder=object(),age_estimator=object())
+    calls=[]
+    def sweep(**kwargs):
+        calls.append(kwargs['target_ages'][0])
+        if len(calls)==2:raise KeyboardInterrupt()
+        frame=pd.DataFrame([dict(strength=.27)])
+        frame.attrs['selected_results']=[{'image':Image.new('RGB',(16,16))}]
+        frame.attrs['assisted_results']=[{'image':Image.new('RGB',(16,16))}]
+        frame.attrs['assisted']=frame.copy()
+        return frame
+    with pytest.raises(KeyboardInterrupt):run_picking_variants(cfg,bundle=bundle,sweep_backend=sweep)
+    if legacy:(tmp_path/'out/resume_state.json').unlink()
+    capsys.readouterr()
+    original_load=ImageResolver.load
+    decoded=[]
+    def load(self,*args,**kwargs):
+        decoded.append(args[0]);return original_load(self,*args,**kwargs)
+    monkeypatch.setattr(ImageResolver,'load',load)
+    resumed=run_picking_variants(cfg,bundle=bundle,sweep_backend=sweep)
+    output=capsys.readouterr().out
+    assert '[ours picking variants] 1/2 | remaining=1' in output
+    assert '[ours picking variants] 0/2' not in output
+    assert calls==[50,51,51]
+    assert len(decoded)==1
+    assert len(resumed['manifest'])==4
+    assert resumed['failures'].empty
 
 
 def test_gap_start_interpolates_and_respects_search_bounds():

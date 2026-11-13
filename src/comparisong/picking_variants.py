@@ -130,7 +130,8 @@ def initial_strength_for_transition(source_age,target_age,config):
     return min(config.max_strength,max(config.min_strength,start))
 
 
-def run_picking_variants(config,*,bundle,sweep_backend=None,progress_every=100):
+def run_picking_variants(config,*,bundle,sweep_backend=None,progress_every=100,
+        resume_validation='fast',resume_workers=16):
     """One canonical smart search per pair, plus its assisted prompt variant.
 
     Matches diagnose_checkpoint_smart_age_sweep exactly: the assisted image
@@ -141,6 +142,8 @@ def run_picking_variants(config,*,bundle,sweep_backend=None,progress_every=100):
     No model download/loading happens here. Residency spans all transitions.
     By default existing outputs are backed up to stale/ and replaced. Only
     overwrite=False together with resume=True enables cached-image reuse.
+    Fast resume trusts unchanged inputs, imports legacy PNG/JSON filenames once,
+    and then uses saved progress without decoding completed images.
     """
     if not 0<config.min_strength<=config.max_strength<=1:raise ValueError('Invalid picking strength bounds')
     if not isinstance(config.overwrite,bool):raise ValueError('overwrite must be a boolean')
@@ -167,21 +170,91 @@ def run_picking_variants(config,*,bundle,sweep_backend=None,progress_every=100):
     if isinstance(progress_every,bool) or not isinstance(progress_every,int) or progress_every<1:
         raise ValueError('progress_every must be a positive integer')
     total=len(panel)
-    print(f'[ours picking variants] 0/{total}',flush=True)
+    if resume_validation not in {'fast','strict'}:
+        raise ValueError('resume_validation must be fast or strict')
+    if isinstance(resume_workers,bool) or not isinstance(resume_workers,int) or resume_workers<1:
+        raise ValueError('resume_workers must be a positive integer')
+    from .prediction_resume import ProgressResume,ResumeIndex
+    progress=ProgressResume(output/'resume_state.json')
+    context=stable_hash(dict(signature=signature,roots=roots))
+    contexts={name:context for name in names}
+    expected=set(panel.sample_id)
+    blocked={name:set() for name in names}
+    restored={}
+    fast=config.resume and not config.overwrite and resume_validation=='fast'
+    # A changed configuration must still follow the existing per-pair signature
+    # validation, rather than trusting filenames from an incompatible run.
+    if any(record.get('context')!=context for record in progress.models.values()):
+        fast=False
+    if fast and not progress.models:
+        try:
+            if json.loads((output/'run_config.json').read_text()).get('signature')!=signature:
+                fast=False
+        except (OSError,ValueError):pass  # Interrupted legacy runs have no run_config yet.
+    if not fast:progress.models={}
     def report_progress(number):
         if number%progress_every==0 or number==total:
             print(f'[ours picking variants] {number}/{total} | remaining={total-number} | failed={len(failures)}',flush=True)
     def persist():
         pd.DataFrame(rows).to_csv(output/'prediction_manifest.csv',index=False)
         pd.DataFrame(failures,columns=[*panel.columns,'model_name','generated_path','inference_status','inference_error']).to_csv(output/'inference_failures.csv',index=False)
+        progress.save(rows,contexts,expected,blocked)
     def quarantine(path,marker):
         if path.exists():
             stale=output/'stale'/path.relative_to(output/'generated')
             stale=stale.with_name(stale.stem+'_'+uuid.uuid4().hex+stale.suffix);stale.parent.mkdir(parents=True,exist_ok=True)
             shutil.move(str(path),str(stale))
             if marker.exists():shutil.copy2(marker,stale.with_suffix('.json'))
+    if fast:
+        print('[resume] ours picking variants: reading saved progress and listing pending ID folders...',flush=True)
+        samples=panel.to_dict('records')
+        try:
+            legacy_rows={(row['sample_id'],row['model_name']):row for row in
+                pd.read_csv(output/'prediction_manifest.csv').to_dict('records')}
+        except (OSError,ValueError):legacy_rows={}
+        for name in names:
+            saved=progress.load(name,context) or {}
+            blocked[name]=set(saved.get('pending',[]))
+            previous={row['sample_id']:row for row in saved.get('rows',[]) if row['sample_id'] in expected}
+            if any(row['inference_status']=='ok' for row in previous.values()) and not Path(roots[name]).is_dir():
+                previous={}
+            eligible={}
+            for sample in samples:
+                row=previous.get(sample['sample_id'])
+                if row:
+                    if not all(row.get(k)==sample[k] for k in ['identity_id','source_age','target_age','source_path','target_path']):
+                        blocked[name].add(sample['sample_id'])
+                    elif not (config.retry_failed and row['inference_status']=='failed'):
+                        eligible[sample['sample_id']]=row
+            unknown=panel[~panel.sample_id.isin(eligible)]
+            index=ResumeIndex(output/'resume'/f'{name}.json',roots[name],unknown.identity_id,workers=resume_workers) if len(unknown) else None
+            for sample in samples:
+                sample_id=sample['sample_id'];row=eligible.get(sample_id)
+                if row is None and sample_id not in blocked[name]:
+                    path=Path(roots[name])/sample['identity_id']/(sample_id+'.png')
+                    cached,valid,_=index.fast_inspect(path)
+                    if valid and not (config.retry_failed and cached.get('status')=='failed'):
+                        row=dict(sample,model_name=name,generated_path=str(path),inference_status='ok',
+                            initial_strength=initial_strength_for_transition(sample['source_age'],sample['target_age'],config),
+                            initial_strength_policy='age_gap' if config.target_age_strength_map is None else 'explicit_target_map')
+                        legacy=legacy_rows.get((sample_id,name),{})
+                        if all(legacy.get(k)==sample[k] for k in ['identity_id','source_age','target_age','source_path','target_path']):
+                            row.update({k:legacy[k] for k in ['selected_variant','strength'] if k in legacy})
+                        if cached.get('status')=='failed':
+                            row.update(generated_path=None,inference_status='failed',inference_error=cached.get('error','Cached failure'))
+                if row is not None:
+                    restored[(sample_id,name)]=row;rows.append(row)
+                    if row['inference_status']=='failed':failures.append(row)
+    completed=sum(all((sample_id,name) in restored for name in names) for sample_id in panel.sample_id)
+    pending_panel=panel[~panel.sample_id.map(lambda sample_id:all((sample_id,name) in restored for name in names))]
+    for name in names:
+        blocked[name]={sample_id for sample_id in panel.sample_id if (sample_id,name) not in restored}
+    # Save recovered progress before inference so another interruption cannot
+    # discard the completed prefix or trust stale artifacts from a changed run.
+    persist()
+    print(f'[ours picking variants] {completed}/{total} | remaining={len(pending_panel)} | failed={len(failures)}',flush=True)
     try:
-        for number,sample in enumerate(panel.to_dict('records'),1):
+        for number,sample in enumerate(pending_panel.to_dict('records'),completed+1):
             start=initial_strength_for_transition(sample['source_age'],sample['target_age'],config)
             sample={**sample,'initial_strength':start,
                 'initial_strength_policy':'age_gap' if config.target_age_strength_map is None else 'explicit_target_map'}
@@ -191,12 +264,14 @@ def run_picking_variants(config,*,bundle,sweep_backend=None,progress_every=100):
                 key=stable_hash(dict(run=signature,source=digest,source_age=sample['source_age'],target_age=sample['target_age']))
             except Exception as exc:
                 for name in names:
+                    if (sample['sample_id'],name) in restored:continue
                     path=Path(roots[name])/sample['identity_id']/(sample['sample_id']+'.png')
                     quarantine(path,path.with_suffix('.json'))
                     row=dict(sample,model_name=name,generated_path=None,inference_status='failed',inference_error=str(exc))
                     rows.append(row);failures.append(row)
                 persist();report_progress(number);continue
             for name in names:
+                if (sample['sample_id'],name) in restored:continue
                 path=Path(roots[name])/sample['identity_id']/(sample['sample_id']+'.png');marker=path.with_suffix('.json')
                 row=dict(sample,model_name=name,generated_path=str(path),inference_status='ok')
                 cached=None;valid=False

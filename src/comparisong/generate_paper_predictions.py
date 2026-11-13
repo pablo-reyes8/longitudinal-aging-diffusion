@@ -356,7 +356,8 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
         pc=PickingVariantsConfig(checkpoint_path=checkpoint_path,test_manifest_path=out/'transitions.csv',
             output_dir=out/'picking',source_root=config.source_root,seed=config.seed,device=device,
             resume=config.resume,retry_failed=retry_failed,**params)
-        selected=run_picking_variants(pc,bundle=picking_bundle,progress_every=progress_every)
+        selected=run_picking_variants(pc,bundle=picking_bundle,progress_every=progress_every,
+            resume_validation=resume_validation,resume_workers=resume_workers)
         for row in selected['manifest'].to_dict('records'):
             name=row['model_name']
             if name not in picking:continue
