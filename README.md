@@ -210,9 +210,7 @@ result = infer_face_aging(
     target_age=65,
     use_inverse_diffusion=False,
     text_reference_mode="source_age",
-    age_guidance_scale=3.0,
-    seed=42,
-)
+    age_guidance_scale=3.0)
 ```
 
 - [`notebooks/data_loader.ipynb`](notebooks/data_loader.ipynb): build and inspect loaders.
