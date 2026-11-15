@@ -93,7 +93,8 @@ def test_more_long_pairs_are_inventory_only_within_current_test_identities(tmp_p
     assert panel.sample_id.tolist()==['p']
 
 
-def test_frozen_dino_loader_uses_saved_pca_and_does_not_write_references(tmp_path,monkeypatch):
+@pytest.mark.parametrize('relocated',[False,True])
+def test_frozen_dino_loader_uses_saved_pca_and_does_not_write_references(tmp_path,monkeypatch,relocated):
     from src.comparisong.frozen_dino import load_frozen_dino_backend
     from src.aging_bias.embedding_features import EmbeddingFeatureBackend
     import src.aging_bias.embedding_features as embedding
@@ -108,12 +109,20 @@ def test_frozen_dino_loader_uses_saved_pca_and_does_not_write_references(tmp_pat
     directory=cfg.reference_bundle_path/'dinov2';directory.mkdir()
     backend.save(directory/'embedding_pca.npz')
     ref.attributes=['embedding_0','embedding_1']
+    if relocated:
+        original=tmp_path/'original.task';original.write_bytes(b'frozen landmark task')
+        cfg.features.landmark_model_path=str(original)
+        ref.metadata['config']['features']['landmark_model_path']=str(original)
     ref.feature_config_hash=FeatureStore(tmp_path/'probe',cfg.features,None,backend).config_hash
     ref.save(directory)
     before={p:p.read_bytes() for p in directory.iterdir()}
+    options={}
+    if relocated:
+        current=tmp_path/'relocated.task';current.write_bytes(original.read_bytes());original.unlink()
+        options['landmark_model_path']=current
     monkeypatch.setattr(embedding,'DinoV2Encoder',Encoder)
     loaded,prepared=load_frozen_dino_backend(cfg.reference_bundle_path,root=tmp_path/'assets',
-        landmark_backend=None,cache_dir=tmp_path/'evalcache',allow_download=False,device='cuda')
+        landmark_backend=None,cache_dir=tmp_path/'evalcache',allow_download=False,device='cuda',**options)
     assert prepared['feature_backend'].cache_id==backend.cache_id
     assert prepared['embedding_device']=='cuda'
     assert loaded.attributes==['embedding_0','embedding_1']

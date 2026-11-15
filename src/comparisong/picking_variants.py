@@ -151,7 +151,7 @@ def run_picking_variants(config,*,bundle,sweep_backend=None,progress_every=100,
         raise ValueError('max_trials_per_target must be an integer in [1,20]')
     if bundle.get('unet') is None or bundle.get('identity_encoder') is None or bundle.get('age_estimator') is None:
         raise ValueError('Use the inference bundle with ArcFace/MiVOLO, not the evaluation bundle')
-    panel=load_test_panel(config.test_manifest_path,config.source_root)
+    panel=load_test_panel(config.test_manifest_path,config.source_root,require_target=False)
     # Validate the policy before any inference or GPU placement.
     initial_strength_for_transition(panel.iloc[0].source_age,panel.iloc[0].target_age,config)
     output=Path(config.output_dir);output.mkdir(parents=True,exist_ok=True)
@@ -212,6 +212,7 @@ def run_picking_variants(config,*,bundle,sweep_backend=None,progress_every=100,
             legacy_rows={(row['sample_id'],row['model_name']):row for row in
                 pd.read_csv(output/'prediction_manifest.csv').to_dict('records')}
         except (OSError,ValueError):legacy_rows={}
+        legacy_source_digests={}
         for name in names:
             saved=progress.load(name,context) or {}
             blocked[name]=set(saved.get('pending',[]))
@@ -233,6 +234,18 @@ def run_picking_variants(config,*,bundle,sweep_backend=None,progress_every=100,
                 if row is None and sample_id not in blocked[name]:
                     path=Path(roots[name])/sample['identity_id']/(sample_id+'.png')
                     cached,valid,_=index.fast_inspect(path)
+                    if valid:
+                        # Import old runs once, without decoding PNGs. Filenames
+                        # alone cannot distinguish older prompt protocols.
+                        try:
+                            cached=json.loads(path.with_suffix('.json').read_text())
+                            source=sample['source_path']
+                            if source not in legacy_source_digests:
+                                legacy_source_digests[source]=file_hash(source)
+                            expected_key=stable_hash(dict(run=signature,source=legacy_source_digests[source],
+                                source_age=sample['source_age'],target_age=sample['target_age']))
+                            valid=cached.get('signature')==expected_key
+                        except (OSError,ValueError):valid=False
                     if valid and not (config.retry_failed and cached.get('status')=='failed'):
                         row=dict(sample,model_name=name,generated_path=str(path),inference_status='ok',
                             initial_strength=initial_strength_for_transition(sample['source_age'],sample['target_age'],config),
@@ -240,6 +253,7 @@ def run_picking_variants(config,*,bundle,sweep_backend=None,progress_every=100,
                         legacy=legacy_rows.get((sample_id,name),{})
                         if all(legacy.get(k)==sample[k] for k in ['identity_id','source_age','target_age','source_path','target_path']):
                             row.update({k:legacy[k] for k in ['selected_variant','strength'] if k in legacy})
+                        row.update(cached.get('selection',{}))
                         if cached.get('status')=='failed':
                             row.update(generated_path=None,inference_status='failed',inference_error=cached.get('error','Cached failure'))
                 if row is not None:

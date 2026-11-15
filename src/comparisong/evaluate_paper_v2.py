@@ -17,11 +17,21 @@ from src.quantitative_metrics.evaluator import _cosine,_git_commit,_safe_version
 from .critic_provenance import assert_independent_age,contamination_flags,CRITIC_PROVENANCE
 
 
-def load_test_panel(manifest_path,source_root=None,*,aging_only=False):
+def load_test_panel(manifest_path,source_root=None,*,aging_only=False,require_target=True):
+    """Load observed pairs, or explicitly allow absent targets for generation.
+
+    Blank targets stay blank across CSV/resume round trips. Evaluation defaults
+    to requiring real targets; counterfactual metrics use a separate evaluator.
+    """
     df=pd.read_csv(manifest_path,dtype={'sample_id':str,'identity_id':str}) if not isinstance(manifest_path,pd.DataFrame) else manifest_path.copy()
+    if not require_target:
+        if 'target_path' not in df:df['target_path']=''
+        else:df['target_path']=df['target_path'].fillna('')
     required=['sample_id','identity_id','source_age','target_age','source_path','target_path']
     if not set(required)<=set(df):raise ValueError(f'Test manifest requires {required}')
     if df[required].isna().any().any():raise ValueError('Test manifest contains missing IDs, ages or image paths')
+    if require_target and df.target_path.astype(str).str.strip().eq('').any():
+        raise ValueError('Test manifest contains missing target image paths')
     for key in ['sample_id','identity_id']:df[key]=df[key].astype(str)
     panel=df[required+(['gender'] if 'gender' in df else [])].drop_duplicates()
     if panel.duplicated('sample_id').any():raise ValueError('Conflicting source/target metadata for a sample_id')
@@ -35,7 +45,8 @@ def load_test_panel(manifest_path,source_root=None,*,aging_only=False):
         if panel.empty:raise ValueError('No aging transitions in test manifest')
     if source_root:
         for role in ['source','target']:
-            panel[role+'_path']=[str(Path(source_root)/str(r.identity_id)/Path(getattr(r,role+'_path')).name) for r in panel.itertuples()]
+            panel[role+'_path']=[str(Path(source_root)/str(r.identity_id)/Path(getattr(r,role+'_path')).name)
+                if getattr(r,role+'_path') else '' for r in panel.itertuples()]
     return panel.reset_index(drop=True)
 
 

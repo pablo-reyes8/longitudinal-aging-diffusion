@@ -13,12 +13,15 @@ def validate_frozen_dino_files(reference_dir):
     return directory
 
 
-def load_frozen_dino_backend(reference_dir,*,root,landmark_backend,cache_dir,allow_download=False,device='auto'):
+def load_frozen_dino_backend(reference_dir,*,root,landmark_backend,cache_dir,allow_download=False,device='auto',
+        landmark_model_path=None):
     directory=validate_frozen_dino_files(reference_dir)
     ref=ReferenceBundle.load(directory,load_training_data=False)
     if not ref.metadata.get('module1_close'):
         raise ValueError('DINO bundle is not a closed module-1 reference; finish that step without refitting here')
     cfg=ref.metadata['config'];features=FeatureConfig(**cfg['features'])
+    # Relocation is allowed; FeatureStore still verifies the frozen byte hash.
+    if landmark_model_path is not None:features.landmark_model_path=str(landmark_model_path)
     with np.load(directory/'embedding_pca.npz',allow_pickle=False) as data:
         encoder_id=str(data['encoder_id']);components=int(data['components'].shape[0])
     from src.aging_bias.embedding_features import DinoV2Encoder,CachedEncoder,EmbeddingFeatureBackend

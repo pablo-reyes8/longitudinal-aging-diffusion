@@ -38,7 +38,7 @@ def generate_paper_predictions(config, *, checkpoint_path=None, comparison_bundl
     from .generate_images import age_image
     from .load_models import load_aging_models
     from .evaluation_backends_v2 import file_hash
-    panel=load_test_panel(config.test_manifest_path,config.source_root)
+    panel=load_test_panel(config.test_manifest_path,config.source_root,require_target=False)
     excluded=panel[panel.delta_age<0].copy()
     aging_only=getattr(config,'aging_only',True)
     if aging_only:
