@@ -98,6 +98,19 @@ def _load_sam_align_face(sam_root):
     return module.align_face
 
 
+def _load_fran_process_image(fran_root):
+    """Load FRAN's file directly; the host also owns a scripts package."""
+    path = Path(fran_root) / "scripts" / "test_functions.py"
+    if not path.is_file():
+        raise FileNotFoundError(f"FRAN processing implementation is missing: {path}")
+    spec = importlib.util.spec_from_file_location("_face_aging_fran_processing", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load FRAN processing implementation: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.process_image
+
+
 def load_aging_models(
     root="/content/aging_benchmarks",
 
@@ -560,7 +573,7 @@ def load_aging_models(
             ])
 
             from model.models import UNet
-            from scripts.test_functions import process_image
+            process_image = _load_fran_process_image(fran_root)
 
         finally:
 

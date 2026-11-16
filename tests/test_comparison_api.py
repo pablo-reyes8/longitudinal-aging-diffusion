@@ -44,6 +44,25 @@ def test_sam_alignment_reports_incomplete_repository(tmp_path):
         load_models._load_sam_align_face(tmp_path)
 
 
+def test_fran_processor_ignores_host_scripts_package(monkeypatch,tmp_path):
+    import sys
+    from types import ModuleType
+    from src.comparisong import load_models
+    scripts=tmp_path/'FRAN'/'scripts';scripts.mkdir(parents=True)
+    (scripts/'test_functions.py').write_text('def process_image(image):\n    return ("FRAN", image)\n',encoding='utf-8')
+    host=ModuleType('scripts');host.__path__=[str(tmp_path/'host_scripts')]
+    monkeypatch.setitem(sys.modules,'scripts',host)
+    process=load_models._load_fran_process_image(scripts.parent)
+    assert process('face.png')==('FRAN','face.png')
+    assert sys.modules['scripts'] is host
+
+
+def test_fran_processor_reports_incomplete_repository(tmp_path):
+    from src.comparisong import load_models
+    with pytest.raises(FileNotFoundError,match='test_functions.py'):
+        load_models._load_fran_process_image(tmp_path)
+
+
 def test_fading_loader_uses_stable_runner_and_applies_path_fix_without_network(
     monkeypatch,
     tmp_path,
